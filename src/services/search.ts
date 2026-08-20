@@ -24,9 +24,9 @@ const SITES_BY_DEGREE: Record<DegreeLevel, string[]> = {
 };
 
 const DEGREE_TERM: Record<DegreeLevel, string> = {
-  bachelor: "Bachelor program",
-  master: "Master program",
-  phd: "PhD position",
+  bachelor: "Bachelor",
+  master: "Master",
+  phd: "PhD",
 };
 
 const DDG_HEADERS = {
@@ -34,22 +34,45 @@ const DDG_HEADERS = {
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
     "AppleWebKit/537.36 (KHTML, like Gecko) " +
     "Chrome/124.0 Safari/537.36",
-
   accept:
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif," +
     "image/webp,*/*;q=0.8",
-
   "accept-language": "en-US,en;q=0.9",
-
   referer: "https://html.duckduckgo.com/",
+  "sec-fetch-dest": "document",
+  "sec-fetch-mode": "navigate",
+  "sec-fetch-site": "same-origin",
+  "sec-fetch-user": "?1",
 };
+
+function escapeQueryPart(value: string): string {
+  return value
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildSearchQuery(
+  site: string,
+  degreeLevel: DegreeLevel,
+  fieldHint: string,
+  countryHint?: string,
+): string {
+  const parts = [
+    `site:${site}`,
+    DEGREE_TERM[degreeLevel],
+    escapeQueryPart(fieldHint),
+    escapeQueryPart(countryHint ?? ""),
+  ].filter(Boolean);
+
+  return parts.join(" ");
+}
 
 async function postDuckDuckGo(
   endpoint: string,
   query: string,
 ): Promise<string> {
   const body = new URLSearchParams();
-
   body.set("q", query);
   body.set("b", "");
 
@@ -71,71 +94,21 @@ async function postDuckDuckGo(
   return await response.text();
 }
 
-async function searchSiteViaDuckDuckGo(
-  site: string,
-  degreeLevel: DegreeLevel,
-  fieldHint: string,
-  countryHint?: string,
-): Promise<PositionListing[]> {
-  const query = [
-    `site:${site}`,
-    `"${DEGREE_TERM[degreeLevel]}"`,
-    fieldHint,
-    countryHint ?? "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+function getAttribute(tag: string, name: string): string {
+  const regex = new RegExp(
+    `\\b${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`,
+    "i",
+  );
 
-  /*
-   * First try DuckDuckGo Lite.
-   * It is specifically designed for lightweight non-JS clients.
-   */
-  try {
-    const html = await postDuckDuckGo(
-      "https://lite.duckduckgo.com/lite/",
-      query,
-    );
+  const match = tag.match(regex);
+  return match?.[2] ?? "";
+}
 
-    const results = parseDuckDuckGoLiteResults(html, site);
-
-    if (results.length > 0) {
-      console.log(
-        `DuckDuckGo Lite: ${site} -> ${results.length} results`,
-      );
-
-      return results;
-    }
-  } catch (error) {
-    console.error(
-      `DuckDuckGo Lite failed for ${site}:`,
-      String(error),
-    );
-  }
-
-  /*
-   * Fallback to the regular HTML endpoint.
-   */
-  try {
-    const html = await postDuckDuckGo(
-      "https://html.duckduckgo.com/html/",
-      query,
-    );
-
-    const results = parseDuckDuckGoHtmlResults(html, site);
-
-    console.log(
-      `DuckDuckGo HTML: ${site} -> ${results.length} results`,
-    );
-
-    return results;
-  } catch (error) {
-    console.error(
-      `DuckDuckGo HTML failed for ${site}:`,
-      String(error),
-    );
-
-    return [];
-  }
+function stripTags(text: string): string {
+  return text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\\s+/g, " ")
+    .trim();
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -147,137 +120,186 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&#39;/gi, "'")
     .replace(/&#x27;/gi, "'")
     .replace(/&#x2F;/gi, "/")
+    .replace(/&#(\d+);/g, (_, code: string) => {
+      const value = Number(code);
+      return Number.isFinite(value) ? String.fromCodePoint(value) : _;
+    })
     .replace(/<[^>]+>/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function resolveDuckDuckGoLink(href: string): string {
-  if (href.includes("uddg=")) {
-    const match = href.match(/[?&]uddg=([^&]+)/);
+  const cleaned = decodeHtmlEntities(href.trim());
 
-    if (match) {
-      try {
-        return decodeURIComponent(match[1]);
-      } catch {
-        return href;
-      }
+  if (!cleaned) {
+    return "";
+  }
+
+  try {
+    const url = new URL(cleaned, "https://html.duckduckgo.com/");
+    const uddg = url.searchParams.get("uddg");
+
+    if (uddg) {
+      return decodeURIComponent(uddg);
+    }
+
+    return url.href;
+  } catch {
+    try {
+      return decodeURIComponent(cleaned);
+    } catch {
+      return cleaned;
     }
   }
-
-  if (href.startsWith("//")) {
-    return `https:${href}`;
-  }
-
-  return href;
 }
 
-/**
- * Parser for DuckDuckGo Lite.
- *
- * Typical Lite markup contains:
- *
- * <a rel="nofollow" class="result-link" href="...">
- *   Result title
- * </a>
- */
-function parseDuckDuckGoLiteResults(
+function normalizeHost(hostname: string): string {
+  return hostname
+    .toLowerCase()
+    .replace(/^www\./, "")
+    .replace(/\.$/, "");
+}
+
+function belongsToSourceSite(url: string, sourceSite: string): boolean {
+  try {
+    const hostname = normalizeHost(new URL(url).hostname);
+    const site = normalizeHost(sourceSite);
+
+    return hostname === site || hostname.endsWith(`.${site}`);
+  } catch {
+    return false;
+  }
+}
+
+function parseResultAnchors(
   html: string,
   sourceSite: string,
 ): PositionListing[] {
   const results: PositionListing[] = [];
 
-  const resultRegex =
-    /<a[^>]*class=["'][^"']*result-link[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-
+  // Do not assume attribute order. DDG has changed the order of class/href
+  // attributes over time, which made the old regex silently return zero rows.
+  const anchorRegex = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
   let match: RegExpExecArray | null;
 
-  while ((match = resultRegex.exec(html)) !== null) {
-    const url = resolveDuckDuckGoLink(match[1]);
-    const title = decodeHtmlEntities(match[2]);
+  while ((match = anchorRegex.exec(html)) !== null) {
+    const attrs = match[1];
+    const className = getAttribute(attrs, "class");
 
-    if (!url || !title) {
+    if (!/\bresult__a\b/i.test(className)) {
+      continue;
+    }
+
+    const href = resolveDuckDuckGoLink(getAttribute(attrs, "href"));
+    const title = decodeHtmlEntities(stripTags(match[2]));
+
+    if (!href || !title || !belongsToSourceSite(href, sourceSite)) {
       continue;
     }
 
     results.push({
       title,
-      url,
+      url: href,
       snippet: "",
       source_site: sourceSite,
     });
   }
 
-  /*
-   * Lite pages sometimes expose snippets in result-snippet elements.
-   */
-  const snippetRegex =
-    /<(?:td|div)[^>]*class=["'][^"']*result-snippet[^"']*["'][^>]*>([\s\S]*?)<\/(?:td|div)>/gi;
+  return results;
+}
 
+function parseSnippets(html: string): string[] {
   const snippets: string[] = [];
 
-  while ((match = snippetRegex.exec(html)) !== null) {
-    snippets.push(decodeHtmlEntities(match[1]));
+  const elementRegex =
+    /<(?:a|div|td|span)\b([^>]*)>([\s\S]*?)<\/(?:a|div|td|span)>/gi;
+
+  let match: RegExpExecArray | null;
+
+  while ((match = elementRegex.exec(html)) !== null) {
+    const className = getAttribute(match[1], "class");
+
+    if (!/\bresult(?:__snippet|-snippet)\b/i.test(className)) {
+      continue;
+    }
+
+    const snippet = decodeHtmlEntities(stripTags(match[2]));
+
+    if (snippet) {
+      snippets.push(snippet);
+    }
   }
 
+  return snippets;
+}
+
+/**
+ * Parser for DuckDuckGo Lite and regular HTML results.
+ *
+ * The parser intentionally checks the final URL against sourceSite so that
+ * even if DuckDuckGo ignores or weakens the site: operator, a result from
+ * another domain is never returned as a match for the requested source.
+ */
+function parseDuckDuckGoResults(
+  html: string,
+  sourceSite: string,
+): PositionListing[] {
+  const results = parseResultAnchors(html, sourceSite);
+  const snippets = parseSnippets(html);
+
   for (let i = 0; i < results.length; i++) {
-    if (snippets[i]) {
-      results[i].snippet = snippets[i];
-    }
+    results[i].snippet = snippets[i] ?? "";
   }
 
   return results.slice(0, 5);
 }
 
-/**
- * Parser for regular DuckDuckGo HTML results.
- */
-function parseDuckDuckGoHtmlResults(
-  html: string,
-  sourceSite: string,
-): PositionListing[] {
-  const results: PositionListing[] = [];
+async function searchSiteViaDuckDuckGo(
+  site: string,
+  degreeLevel: DegreeLevel,
+  fieldHint: string,
+  countryHint?: string,
+): Promise<PositionListing[]> {
+  const query = buildSearchQuery(
+    site,
+    degreeLevel,
+    fieldHint,
+    countryHint,
+  );
 
-  const resultRegex =
-    /<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  console.log(`Searching ${site} with query: ${query}`);
 
-  const snippetRegex =
-    /<(?:a|div)[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/(?:a|div)>/gi;
+  /*
+   * DuckDuckGo's no-JS HTML endpoint is intended for form POST requests.
+   * Try Lite first, then the regular HTML endpoint.
+   */
+  for (const endpoint of [
+    "https://lite.duckduckgo.com/lite/",
+    "https://html.duckduckgo.com/html/",
+  ]) {
+    try {
+      const html = await postDuckDuckGo(endpoint, query);
+      const results = parseDuckDuckGoResults(html, site);
 
-  const titles: {
-    href: string;
-    title: string;
-  }[] = [];
+      console.log(
+        `DuckDuckGo ${endpoint.includes("lite") ? "Lite" : "HTML"}: ` +
+          `${site} -> ${results.length} results`,
+      );
 
-  let match: RegExpExecArray | null;
-
-  while ((match = resultRegex.exec(html)) !== null) {
-    titles.push({
-      href: resolveDuckDuckGoLink(match[1]),
-      title: decodeHtmlEntities(match[2]),
-    });
-  }
-
-  const snippets: string[] = [];
-
-  while ((match = snippetRegex.exec(html)) !== null) {
-    snippets.push(decodeHtmlEntities(match[1]));
-  }
-
-  for (let i = 0; i < titles.length; i++) {
-    if (!titles[i].href || !titles[i].title) {
-      continue;
+      if (results.length > 0) {
+        return results;
+      }
+    } catch (error) {
+      console.error(
+        `DuckDuckGo ${endpoint.includes("lite") ? "Lite" : "HTML"} ` +
+          `failed for ${site}:`,
+        String(error),
+      );
     }
-
-    results.push({
-      title: titles[i].title,
-      url: titles[i].href,
-      snippet: snippets[i] ?? "",
-      source_site: sourceSite,
-    });
   }
 
-  return results.slice(0, 5);
+  return [];
 }
 
 export async function searchPositions(
@@ -286,7 +308,6 @@ export async function searchPositions(
   countryHint?: string,
 ): Promise<PositionListing[]> {
   const sites = SITES_BY_DEGREE[degreeLevel];
-
   const all: PositionListing[] = [];
 
   for (const site of sites) {
@@ -307,9 +328,6 @@ export async function searchPositions(
     }
   }
 
-  /*
-   * Remove duplicate URLs.
-   */
   const unique = new Map<string, PositionListing>();
 
   for (const listing of all) {
