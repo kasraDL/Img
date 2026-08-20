@@ -1,0 +1,40 @@
+name = "immigration-position-bot"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ---- Storage bindings ----
+
+# D1: relational store for students, CV history, matched positions
+[[d1_databases]]
+binding = "DB"
+database_name = "immigration_bot_db"
+database_id = "f2ccdb60-9be6-44d6-b3e9-752dbae03029"
+
+# R2: raw CV PDF files
+[[r2_buckets]]
+binding = "CV_BUCKET"
+bucket_name = "immigration-bot-cvs"
+
+# KV: short-lived per-chat conversation state (what step the user is on)
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "9f2ff13b5817497ca26f1253a1c478b3"
+
+# Workers AI: free daily quota, no external API key or account needed beyond Cloudflare itself.
+# Used for CV parsing, match scoring, and letter/email drafting.
+[ai]
+binding = "AI"
+
+# Daily sweep for the 10-day application follow-up reminders (see src/handlers/scheduled.ts).
+# Cron Triggers are free on Workers - no extra cost for this.
+[triggers]
+crons = ["0 9 * * *"] # 09:00 UTC every day - adjust to your students' timezone if you like
+
+# ---- Secrets (set with `wrangler secret put <NAME>`, do NOT put real values here) ----
+# TELEGRAM_BOT_TOKEN      - token from @BotFather
+# TELEGRAM_WEBHOOK_SECRET - random string you choose, used to verify Telegram calls
+#
+# No paid API keys are required for this version. Position search uses a free,
+# unofficial DuckDuckGo HTML scrape (see src/services/search.ts) instead of a
+# paid search API - see that file's comments if you want to upgrade later.
