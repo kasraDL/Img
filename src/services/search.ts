@@ -38,33 +38,44 @@ function degreeTerms(level: DegreeLevel): string[] { if (level === "phd") return
 function listingText(listing: PositionListing): string { return [listing.title, listing.snippet, listing.institution, listing.country, listing.url].filter(Boolean).join(" ").toLowerCase(); }
 function matchesAny(text: string, terms: string[]): boolean { return terms.some((term) => text.includes(term.toLowerCase())); }
 
+function siteGuaranteesDegree(site: string, degreeLevel: DegreeLevel): boolean {
+  if (degreeLevel === "phd") return site === "findaphd.com" || site === "phdportal.com" || site === "phdgermany.de";
+  if (degreeLevel === "master") return site === "findamasters.com" || site === "mastersportal.com";
+  return site === "bachelorsportal.com";
+}
+
+/**
+ * A selected core filter is a real requirement now.
+ *
+ * - Selected country: the listing must contain explicit country evidence in
+ *   title/snippet/institution/country/url. Unknown is rejected.
+ * - Selected field: the listing must contain explicit field evidence.
+ * - Degree: degree-specific portals guarantee the selected level; general
+ *   portals must explicitly mention the requested level.
+ *
+ * This intentionally prefers false negatives over silently returning positions
+ * that do not satisfy a user's selected filter.
+ */
 function passesCoreFilters(listing: PositionListing, degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): boolean {
   const text = listingText(listing);
   const fields = fieldTerms(fieldHint);
   const countries = countryTerms(countryHint);
   const degrees = degreeTerms(degreeLevel);
 
-  // Degree is a hard filter only when the listing explicitly states another level.
-  const otherDegreeTerms = ["phd", "doctoral", "doctorate", "studentship", "master", "masters", "msc", "mres", "bachelor", "bachelors", "undergraduate", "bsc"].filter((term) => !degrees.includes(term));
-  if (matchesAny(text, otherDegreeTerms) && !matchesAny(text, degrees)) return false;
-
-  // If the listing explicitly provides country/field metadata, use it as authoritative.
-  // PositionListing does not contain a `field` property, so field evidence comes from
-  // title/snippet/institution/country/url until the detail page is fetched later.
-  if (countries.length && listing.country && !matchesAny(listing.country.toLowerCase(), countries)) return false;
-  if (fields.length && !matchesAny(text, fields)) {
-    // Unknown field evidence is allowed for direct portal browse pages; reject only when
-    // the result contains an explicit, unrelated academic discipline.
-    const unrelated = ["medicine", "law", "accounting", "marketing", "psychology", "history", "linguistics", "philosophy", "nursing"].some((term) => text.includes(term));
-    if (unrelated) return false;
+  if (!siteGuaranteesDegree(listing.source_site ?? "", degreeLevel) && !matchesAny(text, degrees)) {
+    return false;
   }
 
-  // For country, only an explicit conflicting known country rejects the result.
-  if (countries.length) {
-    const knownCountries = Object.entries(COUNTRY_ALIASES).flatMap(([canonical, aliases]) => [canonical, ...aliases]);
-    const mentionsSelected = matchesAny(text, countries);
-    const mentionsOther = knownCountries.some((country) => text.includes(country.toLowerCase()) && !countries.includes(country.toLowerCase()));
-    if (mentionsOther && !mentionsSelected && !listing.country) return false;
+  if (fields.length && !matchesAny(text, fields)) {
+    return false;
+  }
+
+  if (countries.length && !matchesAny(text, countries)) {
+    return false;
+  }
+
+  if (NAV_TITLES.has(listing.title.toLowerCase())) {
+    return false;
   }
 
   return true;
@@ -162,10 +173,13 @@ async function searchSite(site: string, degreeLevel: DegreeLevel, fieldHint: str
 
 export async function searchPositions(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): Promise<PositionListing[]> {
   const all: PositionListing[] = [];
-  for (const site of SITES_BY_DEGREE[degreeLevel]) { try { all.push(...await searchSite(site, degreeLevel, fieldHint, countryHint)); } catch (error) { console.error(`Search failed for ${site}:`, String(error)); } }
-  const unique = dedupe(all).sort((a, b) => relevanceScore(b, degreeLevel, fieldHint, countryHint) - relevanceScore(a, degreeLevel, fieldHint, countryHint)); const candidates = unique.slice(0, 10);
-  console.log(`Multi-site search complete: ${SITES_BY_DEGREE[degreeLevel].length} sites, ${unique.length} filtered unique listings, returning ${candidates.length} candidates for AI matching`);
-  return candidates;
+  for (const site of SITES_BY_DEGREE[degreeLevel]) {
+    try { all.push(...await searchSite(site, degreeLevel, fieldHint, countryHint)); }
+    catch (error) { console.error(`Site search failed for ${site}:`, String(error)); }
+  }
+  const unique = dedupe(all);
+  console.log(`Multi-site search complete: ${SITES_BY_DEGREE[degreeLevel].length} sites, ${unique.length} filtered unique listings, returning ${Math.min(unique.length, 10)} candidates for AI matching`);
+  return unique.slice(0, 10);
 }
 
 export function fallbackSearchLinks(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): string[] {
