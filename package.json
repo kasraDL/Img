@@ -5,8 +5,12 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck",
     "db:init": "wrangler d1 execute immigration_bot_db --file=./src/db/schema.sql",
     "db:init:remote": "wrangler d1 execute immigration_bot_db --remote --file=./src/db/schema.sql",
+    "db:migrate:language": "wrangler d1 execute immigration_bot_db --remote --file=./src/db/migrations/0002_add_language.sql",
+    "db:migrate:applications": "wrangler d1 execute immigration_bot_db --remote --file=./src/db/migrations/0003_add_applications.sql",
     "tail": "wrangler tail"
   },
   "dependencies": {
