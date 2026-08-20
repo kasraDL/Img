@@ -6,23 +6,9 @@ export interface Env {
 
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
-
-  /** Optional production web-search API token. */
-  BRAVE_SEARCH_API_KEY?: string;
 }
 
-// -----------------------------------------------------------------------------
-// Degree
-// -----------------------------------------------------------------------------
-
-export type DegreeLevel =
-  | "bachelor"
-  | "master"
-  | "phd";
-
-// -----------------------------------------------------------------------------
-// Student profile
-// -----------------------------------------------------------------------------
+export type DegreeLevel = "bachelor" | "master" | "phd";
 
 export interface StudentProfile {
   full_name?: string;
@@ -38,10 +24,6 @@ export interface StudentProfile {
   summary: string;
 }
 
-// -----------------------------------------------------------------------------
-// Conversation state
-// -----------------------------------------------------------------------------
-
 export type ConversationStep =
   | "awaiting_cv"
   | "awaiting_search_keywords"
@@ -55,18 +37,10 @@ export type ConversationStep =
   | "awaiting_application_field"
   | "idle";
 
-// -----------------------------------------------------------------------------
-// Funding
-// -----------------------------------------------------------------------------
-
 export type FundingPreference =
   | "funded"
   | "self_funded"
   | "both";
-
-// -----------------------------------------------------------------------------
-// Position type
-// -----------------------------------------------------------------------------
 
 export type PositionType =
   | "phd"
@@ -76,10 +50,6 @@ export type PositionType =
   | "bachelor"
   | "internship"
   | "other";
-
-// -----------------------------------------------------------------------------
-// Search filters
-// -----------------------------------------------------------------------------
 
 export interface SearchFilters {
   degree_level: DegreeLevel;
@@ -93,10 +63,6 @@ export interface SearchFilters {
   deadline_required?: boolean;
   deadline_before?: string;
 }
-
-// -----------------------------------------------------------------------------
-// Session
-// -----------------------------------------------------------------------------
 
 export interface SessionState {
   step: ConversationStep;
@@ -112,9 +78,11 @@ export interface SessionState {
   pending_doc_kind?: "letter" | "email";
 }
 
-// -----------------------------------------------------------------------------
-// Position listing
-// -----------------------------------------------------------------------------
+export interface PositionFilterEvidence {
+  degree?: boolean;
+  field?: boolean;
+  country?: boolean;
+}
 
 export interface PositionListing {
   title: string;
@@ -124,15 +92,10 @@ export interface PositionListing {
   source_site?: string;
   deadline?: string;
   snippet?: string;
+  filter_evidence?: PositionFilterEvidence;
 }
 
-// -----------------------------------------------------------------------------
-// Monitored sources
-// -----------------------------------------------------------------------------
-
-export type SourceType =
-  | "telegram_channel"
-  | "linkedin_page";
+export type SourceType = "telegram_channel" | "linkedin_page";
 
 export interface MonitoredSource {
   id: number;
@@ -140,29 +103,12 @@ export interface MonitoredSource {
   identifier: string;
 }
 
-// -----------------------------------------------------------------------------
-// AI-matched listing
-// -----------------------------------------------------------------------------
-
-export interface MatchedListing
-  extends PositionListing {
+export interface MatchedListing extends PositionListing {
   match_percentage: number;
   match_reasoning: string;
 }
 
-// -----------------------------------------------------------------------------
-// Position status
-// -----------------------------------------------------------------------------
-
-export type PositionStatus =
-  | "new"
-  | "shortlisted"
-  | "applied"
-  | "dismissed";
-
-// -----------------------------------------------------------------------------
-// Matched position with context
-// -----------------------------------------------------------------------------
+export type PositionStatus = "new" | "shortlisted" | "applied" | "dismissed";
 
 export interface MatchedPositionWithContext {
   id: number;
@@ -176,10 +122,6 @@ export interface MatchedPositionWithContext {
   cv_history_id: number;
 }
 
-// -----------------------------------------------------------------------------
-// Position details
-// -----------------------------------------------------------------------------
-
 export interface PositionDetails {
   professor_name?: string;
   professor_email?: string;
@@ -187,12 +129,7 @@ export interface PositionDetails {
   country?: string;
   field?: string;
   funding_info?: string;
-  deadline?: string;
 }
-
-// -----------------------------------------------------------------------------
-// Application
-// -----------------------------------------------------------------------------
 
 export type ApplicationStatus =
   | "draft"
