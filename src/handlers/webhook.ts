@@ -1858,7 +1858,8 @@ async function runSearch(
       await searchPositions(
         degreeLevel,
         fieldHint,
-        countryHint
+        countryHint,
+        env.BRAVE_SEARCH_API_KEY
       );
 
     // -------------------------------------------------------------------------

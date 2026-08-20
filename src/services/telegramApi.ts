@@ -6,6 +6,31 @@ export interface InlineButton {
   url?: string; // for "open in mail app" buttons (mailto:) - set exactly one of url/callback_data
 }
 
+/** Thrown for any non-ok Telegram API response. Carries the raw `description` so callers can pattern-match on it. */
+export class TelegramApiError extends Error {
+  constructor(
+    public readonly method: string,
+    public readonly description: string,
+    public readonly payload: unknown
+  ) {
+    super(`Telegram API error on ${method}: ${description}`);
+    this.name = "TelegramApiError";
+  }
+}
+
+/**
+ * True when Telegram rejected the request because `text` contained characters
+ * that are special in the requested parse_mode (e.g. a stray "_" or "*" in an
+ * AI-generated summary, a position title, or a person's name). This is a very
+ * common failure for content we don't fully control - see callWithTextFallback.
+ */
+function isEntityParseError(error: unknown): boolean {
+  return (
+    error instanceof TelegramApiError &&
+    /can't parse entities/i.test(error.description)
+  );
+}
+
 export class TelegramClient {
   private base: string;
   constructor(private token: string) {
@@ -20,9 +45,36 @@ export class TelegramClient {
     });
     const data = await res.json();
     if (!res.ok || (data as { ok?: boolean }).ok === false) {
-      throw new Error(`Telegram API error on ${method}: ${JSON.stringify(data)}`);
+      const description =
+        (data as { description?: string })?.description ?? JSON.stringify(data);
+      throw new TelegramApiError(method, description, data);
     }
     return data as T;
+  }
+
+  /**
+   * Calls a text-sending method (sendMessage / editMessageText) and, if Telegram
+   * rejects it purely because of unescaped Markdown in `text`, retries once as
+   * plain text instead of losing the message entirely. We deliberately don't try
+   * to escape Markdown up front: the content mixes trusted UI copy (which uses
+   * real Markdown on purpose) with untrusted text (CV summaries, position titles,
+   * scraped snippets, professor names) that we can't reliably tell apart at the
+   * call site, so a best-effort send-then-fallback is the more robust guarantee
+   * that the student always receives the message.
+   */
+  private async callWithTextFallback<T = unknown>(
+    method: string,
+    body: Record<string, unknown>
+  ): Promise<T> {
+    try {
+      return await this.call<T>(method, body);
+    } catch (error) {
+      if (isEntityParseError(error) && body.parse_mode) {
+        const { parse_mode: _parseMode, ...plain } = body;
+        return await this.call<T>(method, plain);
+      }
+      throw error;
+    }
   }
 
   async sendMessage(
@@ -46,7 +98,7 @@ export class TelegramClient {
     } else {
       body.reply_markup = { remove_keyboard: true };
     }
-    return this.call("sendMessage", body);
+    return this.callWithTextFallback("sendMessage", body);
   }
 
   sendChatAction(chatId: number, action: "typing" | "upload_document" = "typing") {
@@ -87,7 +139,7 @@ export class TelegramClient {
     text: string,
     opts?: { inlineKeyboard?: InlineButton[][] }
   ) {
-    return this.call("editMessageText", {
+    return this.callWithTextFallback("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
       text,

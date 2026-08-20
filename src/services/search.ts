@@ -252,19 +252,17 @@ export async function searchPositions(
   countryHint?: string,
   braveSearchApiKey?: string,
 ): Promise<PositionListing[]> {
-  const all: PositionListing[] = [];
-
-  for (const site of SITES_BY_DEGREE[degreeLevel]) {
-    all.push(
-      ...(await searchSite(
-        site,
-        degreeLevel,
-        fieldHint,
-        countryHint,
-        braveSearchApiKey,
-      )),
-    );
-  }
+  // Each site can take several sequential requests to resolve (query variants x
+  // provider fallback), and a PhD search spans 7 sites. Running sites in parallel
+  // instead of one-by-one keeps the whole search well within Telegram's webhook
+  // response window instead of risking a slow reply (and a duplicate webhook
+  // delivery from Telegram retrying what it thinks was a dropped request).
+  const perSite = await Promise.all(
+    SITES_BY_DEGREE[degreeLevel].map((site) =>
+      searchSite(site, degreeLevel, fieldHint, countryHint, braveSearchApiKey),
+    ),
+  );
+  const all = perSite.flat();
 
   const unique = new Map<string, PositionListing>();
   for (const listing of all) {

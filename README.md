@@ -8,8 +8,9 @@ A Telegram bot on **Cloudflare Workers** that:
 3. Asks which level they're applying for — **Bachelor / Master / PhD**
 4. Asks for a field/research hint and an optional country preference
 5. Searches known academic position sites (FindAPhD, EURAXESS, AcademicPositions,
-   FindAMasters, etc.) via a **free DuckDuckGo HTML search** (no API key), plus
-   any Telegram channels or LinkedIn pages you register
+   FindAMasters, etc.) using the **Brave Search API** if you configure a key, or
+   **Bing's public RSS search** automatically if you don't (no key required
+   either way), plus any Telegram channels or LinkedIn pages you register
 6. Scores every result against the student's profile with Workers AI and returns
    tap-to-act result cards (📄 Letter, ✉️ Email, ⭐ Save, ✅ Applied, 🚫 Dismiss)
 7. For each application, looks up the professor's contact info from the real
@@ -28,7 +29,7 @@ A Telegram bot on **Cloudflare Workers** that:
 | CV PDF storage | Cloudflare R2 | Free (10GB storage) |
 | Conversation state | Cloudflare KV | Free (100k reads/day) |
 | CV parsing, match scoring, letter/email drafting | **Cloudflare Workers AI** | Free **daily quota** (resets every day) |
-| Position search | **DuckDuckGo HTML scrape** | Free, no key — but unofficial (see caveat below) |
+| Position search | **Bing RSS** (default) or **Brave Search API** (optional key) | Free either way (see caveat below) |
 | Excel export | **SheetJS**, generated in-Worker | Free, no external service |
 | 10-day reminder sweep | Cloudflare **Cron Triggers** | Free |
 | Sending the actual email | Student's own mail app (`mailto:`) | Free, and no API/domain setup needed |
@@ -42,13 +43,14 @@ in this stack bills you unless you go past Cloudflare's daily free allowances.
 - **Workers AI's free tier is a daily quota**, not unlimited forever. Fine for
   testing and light real usage; if the bot gets heavy traffic, Cloudflare will
   eventually bill for extra Workers AI usage past the daily allowance.
-- **DuckDuckGo search has no official API** — `src/services/search.ts` scrapes
-  its plain HTML results page, which works today but isn't guaranteed to keep
-  working if DuckDuckGo changes its markup or rate-limits the requests. If it
-  stops working, the bot falls back to just handing the student direct search
-  links. If you outgrow this, Google's Programmable Search Engine gives 100
-  free queries/day with just a Google account (no cost) and is a more stable
-  swap-in — see the comment at the top of `search.ts`.
+- **The default (no-key) search path uses Bing's public RSS endpoint** —
+  `src/services/search.ts` requests `bing.com/search?format=rss`, which is more
+  stable than scraping interactive HTML but is still an unofficial use of a
+  public endpoint, not a contracted API. For production-grade reliability, set
+  the optional `BRAVE_SEARCH_API_KEY` secret (free tier available at
+  https://api.search.brave.com/) — the bot automatically prefers it over Bing
+  whenever it's set. If both a search attempt and the fallback come back empty
+  for a site, the bot hands the student direct search links instead.
 
 ## Stack
 
@@ -56,9 +58,10 @@ in this stack bills you unless you go past Cloudflare's daily free allowances.
 - **D1** — students, CV history, search history, matched positions, applications tracker
 - **R2** — stores the raw CV PDFs
 - **KV** — short-lived conversation state (which step each chat is on)
-- **Workers AI** (`@cf/meta/llama-3.1-8b-instruct`) — CV parsing, match scoring,
+- **Workers AI** (`@cf/openai/gpt-oss-120b`) — CV parsing, match scoring,
   letter/email drafting, listing-page detail extraction
-- **DuckDuckGo HTML search** — free position search across curated sites
+- **Brave Search API** (optional key) with a **Bing RSS** fallback (no key
+  needed) — position search across curated sites, run in parallel per site
 - **SheetJS (`xlsx`)** — builds the `/report` Excel file in-Worker, no external service
 - **Cloudflare Cron Triggers** — daily 10-day follow-up reminder sweep
 
@@ -158,9 +161,10 @@ Two easy upgrades, each independent of the other:
   burn rate — e.g. `@cf/meta/llama-3.3-70b-instruct-fp8-fast`), or switch the
   `callWorkersAI` calls to a real Anthropic Claude API call (a few dollars a month
   at light volume) for meaningfully better CV parsing and letter quality.
-- **Better search**: swap DuckDuckGo scraping in `src/services/search.ts` for
-  Google's Programmable Search Engine (100 free queries/day) or a paid API like
-  SerpAPI for more reliable, higher-volume results.
+- **Better search**: set the optional `BRAVE_SEARCH_API_KEY` secret to move off
+  the Bing RSS fallback in `src/services/search.ts`, or swap it for Google's
+  Programmable Search Engine (100 free queries/day) or a paid API like SerpAPI
+  for even more reliable, higher-volume results.
 
 ## What's new: a friendlier, more capable bot
 
