@@ -37,10 +37,7 @@ export type ConversationStep =
   | "awaiting_application_field"
   | "idle";
 
-export type FundingPreference =
-  | "funded"
-  | "self_funded"
-  | "both";
+export type FundingPreference = "funded" | "self_funded" | "both";
 
 export type PositionType =
   | "phd"
