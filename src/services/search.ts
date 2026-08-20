@@ -20,27 +20,22 @@ const DEGREE_TERM: Record<DegreeLevel, string> = {
   phd: "PhD",
 };
 
-const DDG_HEADERS = {
-  "user-agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-  accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "accept-language": "en-US,en;q=0.9",
-  referer: "https://html.duckduckgo.com/",
-};
-
 function clean(value: string): string {
   return value.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function getAttribute(tag: string, name: string): string {
-  const regex = new RegExp(`\\b${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, "i");
-  return tag.match(regex)?.[2] ?? "";
+function normalizeHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
 }
 
-function stripTags(text: string): string {
-  return text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+function belongsToSourceSite(url: string, sourceSite: string): boolean {
+  try {
+    const hostname = normalizeHost(new URL(url).hostname);
+    const site = normalizeHost(sourceSite);
+    return hostname === site || hostname.endsWith(`.${site}`);
+  } catch {
+    return false;
+  }
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -60,12 +55,26 @@ function decodeHtmlEntities(text: string): string {
     .trim();
 }
 
-function resolveDuckDuckGoLink(href: string): string {
+function stripTags(text: string): string {
+  return decodeHtmlEntities(
+    text.replace(/<[^>]+>/g, " ")
+  );
+}
+
+function getAttribute(tag: string, name: string): string {
+  const regex = new RegExp(
+    `\\b${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`,
+    "i",
+  );
+  return tag.match(regex)?.[2] ?? "";
+}
+
+function resolveSearchLink(href: string): string {
   const cleaned = decodeHtmlEntities(href.trim());
   if (!cleaned) return "";
 
   try {
-    const url = new URL(cleaned, "https://html.duckduckgo.com/");
+    const url = new URL(cleaned, "https://search.brave.com/");
     const uddg = url.searchParams.get("uddg");
     return uddg ? decodeURIComponent(uddg) : url.href;
   } catch {
@@ -77,124 +86,159 @@ function resolveDuckDuckGoLink(href: string): string {
   }
 }
 
-function normalizeHost(hostname: string): string {
-  return hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
-}
-
-function belongsToSourceSite(url: string, sourceSite: string): boolean {
-  try {
-    const hostname = normalizeHost(new URL(url).hostname);
-    const site = normalizeHost(sourceSite);
-    return hostname === site || hostname.endsWith(`.${site}`);
-  } catch {
-    return false;
-  }
-}
-
-async function postDuckDuckGo(endpoint: string, query: string): Promise<string> {
-  const body = new URLSearchParams({ q: query, b: "" });
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { ...DDG_HEADERS, "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-
-  if (!response.ok) {
-    throw new Error(`DuckDuckGo ${endpoint} returned ${response.status}`);
-  }
-  return response.text();
-}
-
-function parseDuckDuckGoResults(html: string, sourceSite: string): PositionListing[] {
-  const results: PositionListing[] = [];
-  const snippets: string[] = [];
-  let match: RegExpExecArray | null;
-
-  // Supports both current HTML result__a and Lite result-link markup.
-  const anchorRegex = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
-  while ((match = anchorRegex.exec(html)) !== null) {
-    const attrs = match[1];
-    const className = getAttribute(attrs, "class");
-    if (!/\b(?:result__a|result-link)\b/i.test(className)) continue;
-
-    const href = resolveDuckDuckGoLink(getAttribute(attrs, "href"));
-    const title = decodeHtmlEntities(stripTags(match[2]));
-    if (!href || !title || !belongsToSourceSite(href, sourceSite)) continue;
-
-    results.push({
-      title,
-      url: href,
-      snippet: "",
-      source_site: sourceSite,
-    });
-  }
-
-  const snippetRegex = /<(?:a|div|td|span)\b([^>]*)>([\s\S]*?)<\/(?:a|div|td|span)>/gi;
-  while ((match = snippetRegex.exec(html)) !== null) {
-    const className = getAttribute(match[1], "class");
-    if (!/\b(?:result__snippet|result-snippet)\b/i.test(className)) continue;
-    const snippet = decodeHtmlEntities(stripTags(match[2]));
-    if (snippet) snippets.push(snippet);
-  }
-
-  for (let i = 0; i < results.length; i++) {
-    results[i].snippet = snippets[i] ?? "";
-  }
-
-  return results.slice(0, 5);
-}
-
 function buildQueries(
   site: string,
   degreeLevel: DegreeLevel,
   fieldHint: string,
   countryHint?: string,
 ): string[] {
-  const terms = [DEGREE_TERM[degreeLevel], clean(fieldHint), clean(countryHint ?? "")]
+  const terms = [
+    DEGREE_TERM[degreeLevel],
+    clean(fieldHint),
+    clean(countryHint ?? ""),
+  ]
     .filter(Boolean)
     .join(" ");
 
-  // Do not depend exclusively on DDG's site: operator. Some DDG endpoints
-  // return an empty page for site-restricted POST queries. We therefore try
-  // the restricted query first and then broader queries, while enforcing the
-  // requested domain after parsing the final URL.
   return [
     `site:${site} ${terms}`,
+    `${terms} site:${site}`,
     `${terms} ${site}`,
-    `"${site}" ${terms}`,
   ];
 }
 
-async function searchSiteViaDuckDuckGo(
+function parseBraveResults(
+  payload: unknown,
+  sourceSite: string,
+): PositionListing[] {
+  const web =
+    typeof payload === "object" &&
+    payload !== null &&
+    "web" in payload
+      ? (payload as { web?: { results?: unknown[] } }).web
+      : undefined;
+
+  const rawResults = Array.isArray(web?.results)
+    ? web.results
+    : [];
+
+  const results: PositionListing[] = [];
+
+  for (const raw of rawResults) {
+    if (typeof raw !== "object" || raw === null) continue;
+
+    const item = raw as {
+      title?: unknown;
+      url?: unknown;
+      description?: unknown;
+    };
+
+    const url =
+      typeof item.url === "string"
+        ? resolveSearchLink(item.url)
+        : "";
+
+    const title =
+      typeof item.title === "string"
+        ? stripTags(item.title)
+        : "";
+
+    const snippet =
+      typeof item.description === "string"
+        ? stripTags(item.description)
+        : "";
+
+    if (
+      !url ||
+      !title ||
+      !belongsToSourceSite(url, sourceSite)
+    ) {
+      continue;
+    }
+
+    results.push({
+      title,
+      url,
+      snippet,
+      source_site: sourceSite,
+    });
+  }
+
+  return results.slice(0, 10);
+}
+
+async function searchBrave(
+  apiKey: string,
+  query: string,
+  sourceSite: string,
+): Promise<PositionListing[]> {
+  const url = new URL(
+    "https://api.search.brave.com/res/v1/web/search",
+  );
+
+  url.searchParams.set("q", query);
+  url.searchParams.set("count", "20");
+  url.searchParams.set("search_lang", "en");
+  url.searchParams.set("safesearch", "moderate");
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      "X-Subscription-Token": apiKey,
+    },
+  });
+
+  if (!response.ok) {
+    const body = (await response.text()).slice(0, 500);
+    throw new Error(
+      `Brave Search returned ${response.status}: ${body}`,
+    );
+  }
+
+  const payload: unknown = await response.json();
+  return parseBraveResults(payload, sourceSite);
+}
+
+/**
+ * Search one site through Brave's structured Search API.
+ *
+ * This intentionally does not scrape search-engine HTML. HTML scraping was
+ * returning zero results from Workers because search-engine bot/challenge
+ * pages are not stable application APIs.
+ */
+async function searchSite(
   site: string,
   degreeLevel: DegreeLevel,
   fieldHint: string,
-  countryHint?: string,
+  countryHint: string | undefined,
+  apiKey: string,
 ): Promise<PositionListing[]> {
-  const queries = buildQueries(site, degreeLevel, fieldHint, countryHint);
-  const endpoints = [
-    "https://lite.duckduckgo.com/lite/",
-    "https://html.duckduckgo.com/html/",
-  ];
+  for (const query of buildQueries(
+    site,
+    degreeLevel,
+    fieldHint,
+    countryHint,
+  )) {
+    console.log(`Brave Search: ${query}`);
 
-  for (const query of queries) {
-    console.log(`Searching ${site} with query: ${query}`);
+    try {
+      const results = await searchBrave(
+        apiKey,
+        query,
+        site,
+      );
 
-    for (const endpoint of endpoints) {
-      try {
-        const html = await postDuckDuckGo(endpoint, query);
-        const results = parseDuckDuckGoResults(html, site);
-        console.log(
-          `DuckDuckGo ${endpoint.includes("lite") ? "Lite" : "HTML"}: ${site} -> ${results.length} results`,
-        );
+      console.log(
+        `Brave Search: ${site} -> ${results.length} results`,
+      );
 
-        if (results.length > 0) return results;
-      } catch (error) {
-        console.error(
-          `DuckDuckGo ${endpoint.includes("lite") ? "Lite" : "HTML"} failed for ${site}:`,
-          String(error),
-        );
-      }
+      if (results.length > 0) return results;
+    } catch (error) {
+      console.error(
+        `Brave Search failed for ${site}:`,
+        String(error),
+      );
     }
   }
 
@@ -206,21 +250,38 @@ export async function searchPositions(
   degreeLevel: DegreeLevel,
   fieldHint: string,
   countryHint?: string,
+  braveSearchApiKey?: string,
 ): Promise<PositionListing[]> {
+  if (!braveSearchApiKey?.trim()) {
+    console.error(
+      "BRAVE_SEARCH_API_KEY is not configured; website search is disabled.",
+    );
+    return [];
+  }
+
   const all: PositionListing[] = [];
 
+  // Run sites sequentially to keep request volume predictable and avoid
+  // unnecessary bursts against the external search API.
   for (const site of SITES_BY_DEGREE[degreeLevel]) {
-    try {
-      all.push(...await searchSiteViaDuckDuckGo(site, degreeLevel, fieldHint, countryHint));
-    } catch (error) {
-      console.error(`Search failed for ${site}:`, String(error));
-    }
+    all.push(
+      ...(await searchSite(
+        site,
+        degreeLevel,
+        fieldHint,
+        countryHint,
+        braveSearchApiKey,
+      )),
+    );
   }
 
   const unique = new Map<string, PositionListing>();
   for (const listing of all) {
-    if (listing.url && !unique.has(listing.url)) unique.set(listing.url, listing);
+    if (listing.url && !unique.has(listing.url)) {
+      unique.set(listing.url, listing);
+    }
   }
+
   return Array.from(unique.values());
 }
 
@@ -229,7 +290,11 @@ export function fallbackSearchLinks(
   fieldHint: string,
   countryHint?: string,
 ): string[] {
-  const q = encodeURIComponent([fieldHint, countryHint ?? ""].filter(Boolean).join(" "));
+  const q = encodeURIComponent(
+    [fieldHint, countryHint ?? ""]
+      .filter(Boolean)
+      .join(" "),
+  );
 
   if (degreeLevel === "phd") {
     return [
@@ -247,5 +312,7 @@ export function fallbackSearchLinks(
     ];
   }
 
-  return [`https://www.bachelorsportal.com/search/bachelor/${q}`];
+  return [
+    `https://www.bachelorsportal.com/search/bachelor/${q}`,
+  ];
 }
