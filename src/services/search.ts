@@ -56,34 +56,7 @@ function decodeHtmlEntities(text: string): string {
 }
 
 function stripTags(text: string): string {
-  return decodeHtmlEntities(
-    text.replace(/<[^>]+>/g, " ")
-  );
-}
-
-function getAttribute(tag: string, name: string): string {
-  const regex = new RegExp(
-    `\\b${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`,
-    "i",
-  );
-  return tag.match(regex)?.[2] ?? "";
-}
-
-function resolveSearchLink(href: string): string {
-  const cleaned = decodeHtmlEntities(href.trim());
-  if (!cleaned) return "";
-
-  try {
-    const url = new URL(cleaned, "https://search.brave.com/");
-    const uddg = url.searchParams.get("uddg");
-    return uddg ? decodeURIComponent(uddg) : url.href;
-  } catch {
-    try {
-      return decodeURIComponent(cleaned);
-    } catch {
-      return cleaned;
-    }
-  }
+  return decodeHtmlEntities(text.replace(/<[^>]+>/g, " "));
 }
 
 function buildQueries(
@@ -133,28 +106,14 @@ function parseBraveResults(
       description?: unknown;
     };
 
-    const url =
-      typeof item.url === "string"
-        ? resolveSearchLink(item.url)
-        : "";
-
-    const title =
-      typeof item.title === "string"
-        ? stripTags(item.title)
-        : "";
-
+    const url = typeof item.url === "string" ? item.url : "";
+    const title = typeof item.title === "string" ? stripTags(item.title) : "";
     const snippet =
       typeof item.description === "string"
         ? stripTags(item.description)
         : "";
 
-    if (
-      !url ||
-      !title ||
-      !belongsToSourceSite(url, sourceSite)
-    ) {
-      continue;
-    }
+    if (!url || !title || !belongsToSourceSite(url, sourceSite)) continue;
 
     results.push({
       title,
@@ -172,17 +131,13 @@ async function searchBrave(
   query: string,
   sourceSite: string,
 ): Promise<PositionListing[]> {
-  const url = new URL(
-    "https://api.search.brave.com/res/v1/web/search",
-  );
-
+  const url = new URL("https://api.search.brave.com/res/v1/web/search");
   url.searchParams.set("q", query);
   url.searchParams.set("count", "20");
   url.searchParams.set("search_lang", "en");
   url.searchParams.set("safesearch", "moderate");
 
   const response = await fetch(url, {
-    method: "GET",
     headers: {
       Accept: "application/json",
       "X-Subscription-Token": apiKey,
@@ -190,55 +145,100 @@ async function searchBrave(
   });
 
   if (!response.ok) {
-    const body = (await response.text()).slice(0, 500);
-    throw new Error(
-      `Brave Search returned ${response.status}: ${body}`,
-    );
+    throw new Error(`Brave Search returned ${response.status}`);
   }
 
-  const payload: unknown = await response.json();
-  return parseBraveResults(payload, sourceSite);
+  return parseBraveResults(await response.json(), sourceSite);
+}
+
+function extractXmlTag(block: string, tag: string): string {
+  const match = block.match(
+    new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "i"),
+  );
+  return match ? stripTags(match[1]) : "";
 }
 
 /**
- * Search one site through Brave's structured Search API.
- *
- * This intentionally does not scrape search-engine HTML. HTML scraping was
- * returning zero results from Workers because search-engine bot/challenge
- * pages are not stable application APIs.
+ * Bing exposes an RSS search representation which is much more stable for
+ * server-side requests than scraping an interactive search-engine page.
  */
+function parseBingRss(xml: string, sourceSite: string): PositionListing[] {
+  const results: PositionListing[] = [];
+  const itemRegex = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = itemRegex.exec(xml)) !== null) {
+    const block = match[1];
+    const title = extractXmlTag(block, "title");
+    const url = extractXmlTag(block, "link");
+    const snippet = extractXmlTag(block, "description");
+
+    if (!title || !url || !belongsToSourceSite(url, sourceSite)) continue;
+
+    results.push({
+      title,
+      url,
+      snippet,
+      source_site: sourceSite,
+    });
+  }
+
+  return results.slice(0, 10);
+}
+
+async function searchBingRss(
+  query: string,
+  sourceSite: string,
+): Promise<PositionListing[]> {
+  const url = new URL("https://www.bing.com/search");
+  url.searchParams.set("q", query);
+  url.searchParams.set("format", "rss");
+  url.searchParams.set("count", "20");
+  url.searchParams.set("setlang", "en-US");
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+      "User-Agent": "Mozilla/5.0 (compatible; ImmigrationPositionBot/1.0)",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Bing RSS returned ${response.status}`);
+  }
+
+  return parseBingRss(await response.text(), sourceSite);
+}
+
 async function searchSite(
   site: string,
   degreeLevel: DegreeLevel,
   fieldHint: string,
   countryHint: string | undefined,
-  apiKey: string,
+  braveSearchApiKey?: string,
 ): Promise<PositionListing[]> {
-  for (const query of buildQueries(
-    site,
-    degreeLevel,
-    fieldHint,
-    countryHint,
-  )) {
-    console.log(`Brave Search: ${query}`);
+  for (const query of buildQueries(site, degreeLevel, fieldHint, countryHint)) {
+    console.log(`Searching ${site}: ${query}`);
 
+    // Preferred provider: structured Brave API.
+    if (braveSearchApiKey?.trim()) {
+      try {
+        const results = await searchBrave(braveSearchApiKey, query, site);
+        console.log(`Brave Search: ${site} -> ${results.length} results`);
+        if (results.length > 0) return results;
+      } catch (error) {
+        console.error(`Brave Search failed for ${site}:`, String(error));
+      }
+    }
+
+    // No secret is required for this fallback. Bing's RSS representation is
+    // substantially more suitable for Workers than DDG HTML scraping.
     try {
-      const results = await searchBrave(
-        apiKey,
-        query,
-        site,
-      );
-
-      console.log(
-        `Brave Search: ${site} -> ${results.length} results`,
-      );
-
+      const results = await searchBingRss(query, site);
+      console.log(`Bing RSS: ${site} -> ${results.length} results`);
       if (results.length > 0) return results;
     } catch (error) {
-      console.error(
-        `Brave Search failed for ${site}:`,
-        String(error),
-      );
+      console.error(`Bing RSS failed for ${site}:`, String(error));
     }
   }
 
@@ -252,17 +252,8 @@ export async function searchPositions(
   countryHint?: string,
   braveSearchApiKey?: string,
 ): Promise<PositionListing[]> {
-  if (!braveSearchApiKey?.trim()) {
-    console.error(
-      "BRAVE_SEARCH_API_KEY is not configured; website search is disabled.",
-    );
-    return [];
-  }
-
   const all: PositionListing[] = [];
 
-  // Run sites sequentially to keep request volume predictable and avoid
-  // unnecessary bursts against the external search API.
   for (const site of SITES_BY_DEGREE[degreeLevel]) {
     all.push(
       ...(await searchSite(
@@ -291,9 +282,7 @@ export function fallbackSearchLinks(
   countryHint?: string,
 ): string[] {
   const q = encodeURIComponent(
-    [fieldHint, countryHint ?? ""]
-      .filter(Boolean)
-      .join(" "),
+    [fieldHint, countryHint ?? ""].filter(Boolean).join(" "),
   );
 
   if (degreeLevel === "phd") {
@@ -312,7 +301,5 @@ export function fallbackSearchLinks(
     ];
   }
 
-  return [
-    `https://www.bachelorsportal.com/search/bachelor/${q}`,
-  ];
+  return [`https://www.bachelorsportal.com/search/bachelor/${q}`];
 }
