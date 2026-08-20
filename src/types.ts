@@ -51,6 +51,7 @@ export type ConversationStep =
   | "awaiting_search_filters"
   | "awaiting_field_hint"
   | "awaiting_country_hint"
+  | "awaiting_minimum_match"
   | "searching"
   | "reviewing_results"
   | "awaiting_application_field"
