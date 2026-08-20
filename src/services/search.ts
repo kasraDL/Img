@@ -70,6 +70,13 @@ const FUNDING_TERMS = ["funded", "fully funded", "funding available", "scholarsh
 const SELF_FUNDED_TERMS = ["self-funded", "self funded", "self finance", "self-finance", "no funding", "without funding"];
 const NAV_TITLES = new Set(["view jobs", "view all jobs", "search", "next", "previous", "login", "sign in", "register", "home", "jobs", "all jobs", "job search", "find jobs", "view more"]);
 
+interface SearchScope {
+  field: boolean;
+  research_area: boolean;
+  country: boolean;
+  degree: boolean;
+}
+
 function clean(value: string): string { return value.replace(/\s+/g, " ").trim(); }
 function normalizeHost(hostname: string): string { return hostname.toLowerCase().replace(/^www\./, "").replace(/\.$/, ""); }
 function isSourceUrl(url: string, site: string): boolean { try { const host = normalizeHost(new URL(url).hostname); const wanted = normalizeHost(site); return host === wanted || host.endsWith(`.${wanted}`); } catch { return false; } }
@@ -85,7 +92,7 @@ function containsAny(text: string, terms: string[]): boolean { return terms.some
 function countryCanonical(text: string): string | undefined { const lower = text.toLowerCase(); for (const [country, aliases] of Object.entries(COUNTRY_ALIASES)) if (aliases.some((alias) => lower.includes(alias))) return country; return undefined; }
 function siteGuaranteesDegree(site: string, level: DegreeLevel): boolean { if (level === "phd") return ["findaphd.com", "phdportal.com", "phdgermany.de"].includes(site); if (level === "master") return ["findamasters.com", "mastersportal.com"].includes(site); return site === "bachelorsportal.com"; }
 
-function countryMatch(listing: PositionListing, selected: string[]): boolean {
+function countryMatch(listing: PositionListing, selected: string[], scopeCountry: boolean): boolean {
   if (!selected.length) return true;
   const text = listingText(listing);
   const wanted = selected.map((x) => x.toLowerCase());
@@ -94,7 +101,13 @@ function countryMatch(listing: PositionListing, selected: string[]): boolean {
     if (canonical) return wanted.includes(canonical);
     return wanted.some((x) => listing.country!.toLowerCase().includes(x));
   }
-  return wanted.some((country) => (COUNTRY_ALIASES[country] ?? [country]).some((alias) => text.includes(alias)));
+  if (wanted.some((country) => (COUNTRY_ALIASES[country] ?? [country]).some((alias) => text.includes(alias)))) return true;
+  return scopeCountry;
+}
+
+function fieldMatch(listing: PositionListing, value: string | undefined, scoped: boolean): boolean {
+  if (!value?.trim()) return true;
+  return containsAny(listingText(listing), fieldTerms(value)) || scoped;
 }
 
 function fundingMatch(listing: PositionListing, preference: SearchFilters["funding"]): boolean {
@@ -133,15 +146,15 @@ function deadlineMatch(listing: PositionListing, required?: boolean): boolean {
   return Boolean(listing.deadline || /deadline|apply by|application closes|applications close|closing date|closing deadline/.test(text));
 }
 
-function coreFilterMatch(listing: PositionListing, filters: SearchFilters): boolean {
+function coreFilterMatch(listing: PositionListing, filters: SearchFilters, scope: SearchScope): boolean {
   if (NAV_TITLES.has(listing.title.toLowerCase())) return false;
   const text = listingText(listing);
-  const degreeOk = containsAny(text, degreeTerms(filters.degree_level)) || siteGuaranteesDegree(listing.source_site ?? "", filters.degree_level);
+  const degreeOk = containsAny(text, degreeTerms(filters.degree_level)) || siteGuaranteesDegree(listing.source_site ?? "", filters.degree_level) || scope.degree;
   if (!degreeOk) return false;
 
-  if (filters.field?.trim() && !containsAny(text, fieldTerms(filters.field))) return false;
-  if (filters.research_area?.trim() && !containsAny(text, fieldTerms(filters.research_area))) return false;
-  if (!countryMatch(listing, filters.countries ?? [])) return false;
+  if (!fieldMatch(listing, filters.field, scope.field)) return false;
+  if (!fieldMatch(listing, filters.research_area, scope.research_area)) return false;
+  if (!countryMatch(listing, filters.countries ?? [], scope.country)) return false;
   if (!fundingMatch(listing, filters.funding)) return false;
   if (!keywordMatch(listing, filters.keywords)) return false;
   if (!positionTypeMatch(listing, filters.position_types ?? [])) return false;
@@ -155,7 +168,7 @@ function relevanceScore(listing: PositionListing, filters: SearchFilters): numbe
   if (containsAny(text, degreeTerms(filters.degree_level))) score += 5;
   if (filters.field && containsAny(text, fieldTerms(filters.field))) score += 5;
   if (filters.research_area && containsAny(text, fieldTerms(filters.research_area))) score += 6;
-  if (filters.countries?.length && countryMatch(listing, filters.countries)) score += 5;
+  if (filters.countries?.length && countryMatch(listing, filters.countries, false)) score += 5;
   if (filters.funding === "funded" && containsAny(text, FUNDING_TERMS)) score += 3;
   if (filters.funding === "self_funded" && containsAny(text, SELF_FUNDED_TERMS)) score += 3;
   if (listing.institution) score += 1;
@@ -241,6 +254,7 @@ async function searchBing(query: string, site: string): Promise<PositionListing[
 
 async function searchSite(site: string, filters: SearchFilters): Promise<PositionListing[]> {
   let raw: PositionListing[] = [];
+  let scope: SearchScope = { field: false, research_area: false, country: false, degree: false };
   for (const url of directSearchUrls(site, filters)) {
     console.log(`Direct portal search ${site}: ${url}`);
     try {
@@ -248,6 +262,7 @@ async function searchSite(site: string, filters: SearchFilters): Promise<Positio
       if (!response.ok) { console.log(`Direct portal ${site}: HTTP ${response.status}`); continue; }
       const defaultCountry = site === "phdgermany.de" && (filters.countries ?? []).includes("Germany") ? "Germany" : site === "jobs.ac.uk" && (filters.countries ?? []).includes("UK") ? "UK" : undefined;
       raw.push(...parseSearchHtml(response.text, site, defaultCountry));
+      scope = { field: Boolean(filters.field || filters.research_area), research_area: Boolean(filters.research_area), country: Boolean(filters.countries?.length), degree: true };
     } catch (error) { console.error(`Direct portal ${site} failed:`, String(error)); }
   }
 
@@ -259,10 +274,11 @@ async function searchSite(site: string, filters: SearchFilters): Promise<Positio
       const provider = await searchBing(query, site);
       console.log(`Bing fallback ${site}: ${provider.length} results`);
       raw = dedupe(provider);
+      if (raw.length > 0) scope = { field: Boolean(filters.field || filters.research_area), research_area: Boolean(filters.research_area), country: Boolean(filters.countries?.length), degree: true };
     } catch (error) { console.error(`Bing fallback failed for ${site}:`, String(error)); }
   }
 
-  const filtered = raw.filter((listing) => coreFilterMatch(listing, filters));
+  const filtered = raw.filter((listing) => coreFilterMatch(listing, filters, scope));
   filtered.sort((a, b) => relevanceScore(b, filters) - relevanceScore(a, filters));
   console.log(`Search complete ${site}: ${raw.length} raw -> ${filtered.length} after all filters -> ${filtered.length} ranked`);
   return filtered.slice(0, 20);
@@ -271,7 +287,6 @@ async function searchSite(site: string, filters: SearchFilters): Promise<Positio
 export async function searchPositions(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string, filtersInput?: SearchFilters): Promise<PositionListing[]> {
   const fieldKey = clean(fieldHint).toLowerCase();
   const inferredParentField = RESEARCH_AREA_PARENT[fieldKey];
-
   const filters: SearchFilters = {
     ...(filtersInput ?? {}),
     degree_level: filtersInput?.degree_level ?? degreeLevel,
@@ -279,20 +294,33 @@ export async function searchPositions(degreeLevel: DegreeLevel, fieldHint: strin
     research_area: filtersInput?.research_area ?? fieldHint,
     countries: filtersInput?.countries ?? (countryHint ? countryHint.split(",").map((x) => x.trim()).filter(Boolean) : []),
   };
-
   const all: PositionListing[] = [];
-  for (const site of SITES_BY_DEGREE[degreeLevel]) {
-    try { all.push(...(await searchSite(site, filters))); } catch (error) { console.error(`Site search failed for ${site}:`, String(error)); }
+  for (const site of SITES_BY_DEGREE[filters.degree_level]) {
+    try { all.push(...await searchSite(site, filters)); } catch (error) { console.error(`Site search failed for ${site}:`, String(error)); }
   }
-
-  const final = dedupe(all).filter((listing) => coreFilterMatch(listing, filters)).sort((a, b) => relevanceScore(b, filters) - relevanceScore(a, filters)).slice(0, 10);
-  console.log(`Multi-site search complete: ${SITES_BY_DEGREE[degreeLevel].length} sites, ${final.length} fully filtered candidates for AI matching`);
-  return final;
+  const unique = dedupe(all).sort((a, b) => relevanceScore(b, filters) - relevanceScore(a, filters)).slice(0, 10);
+  console.log(`Multi-site search complete: ${SITES_BY_DEGREE[filters.degree_level].length} sites, ${unique.length} filtered unique listings, returning ${unique.length} candidates for AI matching`);
+  return unique;
 }
 
 export function fallbackSearchLinks(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): string[] {
   const q = encodeURIComponent([fieldHint, countryHint ?? ""].filter(Boolean).join(" "));
-  if (degreeLevel === "phd") return [`https://www.findaphd.com/phds/?Keywords=${q}`, `https://www.phdportal.com/search/phd/${q}`, `https://euraxess.ec.europa.eu/jobs/search?keywords=${q}`, `https://academicpositions.com/find-jobs?query=${q}`, `https://phdgermany.de/search?q=${q}`, `https://academicjobsonline.org/ajo?joblist=1&keywords=${q}`, `https://www.jobs.ac.uk/search/?keywords=${q}`];
-  if (degreeLevel === "master") return [`https://www.findamasters.com/masters-degrees/?Keywords=${q}`, `https://www.mastersportal.com/search/master/${q}`, `https://www.scholarship-positions.com/?s=${q}`];
-  return [`https://www.bachelorsportal.com/search/bachelor/${q}`, `https://www.scholarship-positions.com/?s=${q}`];
+  if (degreeLevel === "phd") return [
+    `https://www.findaphd.com/phds/?Keywords=${q}`,
+    `https://www.phdportal.com/search/phd/${q}`,
+    `https://euraxess.ec.europa.eu/jobs/search?keywords=${q}`,
+    `https://academicpositions.com/find-jobs?query=${q}`,
+    `https://phdgermany.de/search?q=${q}`,
+    `https://academicjobsonline.org/ajo?joblist=1&keywords=${q}`,
+    `https://www.jobs.ac.uk/search/?keywords=${q}`,
+  ];
+  if (degreeLevel === "master") return [
+    `https://www.findamasters.com/masters-degrees/?Keywords=${q}`,
+    `https://www.mastersportal.com/search/master/${q}`,
+    `https://www.scholarship-positions.com/?s=${q}`,
+  ];
+  return [
+    `https://www.bachelorsportal.com/search/bachelor/${q}`,
+    `https://www.scholarship-positions.com/?s=${q}`,
+  ];
 }
