@@ -148,6 +148,15 @@ function matchesAny(text: string, terms: string[]): boolean {
   return terms.some((term) => text.includes(term.toLowerCase()));
 }
 
+/**
+ * Core filters are deliberately metadata-aware.
+ *
+ * A missing country/field/degree signal is UNKNOWN, not a mismatch, because
+ * many portals put location/discipline on the detail page rather than in the
+ * search-result title/snippet. Only an explicit conflicting signal rejects a
+ * result here. This prevents valid positions from being dropped simply because
+ * the search provider omitted a country or discipline from its snippet.
+ */
 function passesCoreFilters(
   listing: PositionListing,
   degreeLevel: DegreeLevel,
@@ -155,14 +164,36 @@ function passesCoreFilters(
   countryHint?: string,
 ): boolean {
   const text = listingText(listing);
-
-  if (!matchesAny(text, degreeTerms(degreeLevel))) return false;
-
   const fields = fieldTerms(fieldHint);
-  if (fields.length && !matchesAny(text, fields)) return false;
-
   const countries = countryTerms(countryHint);
-  if (countries.length && !matchesAny(text, countries)) return false;
+  const degrees = degreeTerms(degreeLevel);
+
+  // An explicit listing.country is authoritative when present.
+  if (countries.length && listing.country) {
+    const explicitCountry = listing.country.toLowerCase();
+    if (!matchesAny(explicitCountry, countries)) return false;
+  }
+
+  // An explicit listing field is authoritative when present.
+  if (fields.length && listing.field) {
+    const explicitField = listing.field.toLowerCase();
+    if (!matchesAny(explicitField, fields)) return false;
+  }
+
+  // Only reject a clear textual conflict. Missing degree/field/country text is
+  // allowed through to the scoring stage/detail extraction.
+  const degreeMatch = matchesAny(text, degrees);
+  if (!degreeMatch && listing.source_site === "findamasters.com" && degreeLevel !== "master") return false;
+  if (!degreeMatch && listing.source_site === "mastersportal.com" && degreeLevel !== "master") return false;
+  if (!degreeMatch && listing.source_site === "bachelorsportal.com" && degreeLevel !== "bachelor") return false;
+
+  // If the raw result explicitly names a different known country, reject it.
+  if (countries.length) {
+    const knownCountries = Object.values(COUNTRY_ALIASES).flat();
+    const mentionsSelected = matchesAny(text, countries);
+    const mentionsOther = knownCountries.some((country) => text.includes(country) && !countries.includes(country));
+    if (mentionsOther && !mentionsSelected) return false;
+  }
 
   return true;
 }
@@ -175,13 +206,13 @@ function relevanceScore(
 ): number {
   const text = listingText(listing);
   let score = 0;
-
   if (matchesAny(text, degreeTerms(degreeLevel))) score += 5;
-  for (const term of fieldTerms(fieldHint)) if (text.includes(term.toLowerCase())) score += 4;
+  for (const term of fieldTerms(fieldHint)) if (text.includes(term)) score += 4;
   for (const term of countryTerms(countryHint)) if (text.includes(term)) score += 3;
   if (listing.institution) score += 1;
+  if (listing.country) score += 2;
+  if (listing.field) score += 2;
   if (listing.deadline) score += 1;
-
   return score;
 }
 
@@ -198,21 +229,13 @@ function parseSearchHtml(html: string, site: string): PositionListing[] {
   const results: PositionListing[] = [];
   const regex = /<a\b([^>]*)href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let match: RegExpExecArray | null;
-
   while ((match = regex.exec(html)) !== null) {
     const href = decodeEntities(match[2]);
     const title = stripTags(match[3]);
     if (!href || !title || title.length < 5 || !isSourceUrl(href, site)) continue;
     if (NAV_TITLES.has(title.toLowerCase())) continue;
-
-    results.push({
-      title,
-      url: href,
-      snippet: "",
-      source_site: site,
-    });
+    results.push({ title, url: href, snippet: "", source_site: site });
   }
-
   return dedupe(results);
 }
 
@@ -220,28 +243,17 @@ function parseBingRss(xml: string, site: string): PositionListing[] {
   const results: PositionListing[] = [];
   const itemRegex = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
   let match: RegExpExecArray | null;
-
   while ((match = itemRegex.exec(xml)) !== null) {
     const block = match[1];
     const titleMatch = block.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     const linkMatch = block.match(/<link[^>]*>([\s\S]*?)<\/link>/i);
     const descMatch = block.match(/<description[^>]*>([\s\S]*?)<\/description>/i);
-
     const title = titleMatch ? stripTags(titleMatch[1]) : "";
     const url = linkMatch ? stripTags(linkMatch[1]) : "";
     const snippet = descMatch ? stripTags(descMatch[1]) : "";
-
-    if (!title || !url || !isSourceUrl(url, site)) continue;
-    if (NAV_TITLES.has(title.toLowerCase())) continue;
-
-    results.push({
-      title,
-      url,
-      snippet,
-      source_site: site,
-    });
+    if (!title || !url || !isSourceUrl(url, site) || NAV_TITLES.has(title.toLowerCase())) continue;
+    results.push({ title, url, snippet, source_site: site });
   }
-
   return dedupe(results);
 }
 
@@ -252,83 +264,44 @@ async function fetchText(url: string): Promise<{ ok: boolean; status: number; te
       "user-agent": "Mozilla/5.0 (compatible; ImmigrationPositionBot/5.0)",
     },
   });
-
-  return {
-    ok: response.ok,
-    status: response.status,
-    text: await response.text(),
-  };
+  return { ok: response.ok, status: response.status, text: await response.text() };
 }
 
 function directSearchUrls(site: string, fieldHint: string, countryHint?: string): string[] {
   const field = encodeURIComponent(fieldHint || "");
-  const countries = (countryHint ?? "")
-    .split(",")
-    .map((v) => v.trim())
-    .filter(Boolean);
-
+  const countries = (countryHint ?? "").split(",").map((v) => v.trim()).filter(Boolean);
   switch (site) {
-    case "findaphd.com":
-      return [`https://www.findaphd.com/phds/?Keywords=${field}`];
-    case "phdportal.com":
-      return [`https://www.phdportal.com/search/phd/engineering-technology?keyword=${field}`];
-    case "euraxess.ec.europa.eu":
-      return [
-        `https://euraxess.ec.europa.eu/jobs?keywords=${field}`,
-        ...countries.slice(0, 2).map((c) =>
-          `https://euraxess.ec.europa.eu/jobs?keywords=${field}&country=${encodeURIComponent(c)}`
-        ),
-      ];
-    case "academicpositions.com":
-      return countries.length
-        ? countries.slice(0, 2).map((c) =>
-            `https://academicpositions.com/jobs/country/${c.toLowerCase().replace(/\s+/g, "-")}`
-          )
-        : [`https://academicpositions.com/search?query=${field}`];
-    case "phdgermany.de":
-      return [`https://phdgermany.de/search?q=${field}`];
-    case "academicjobsonline.org":
-      return [`https://academicjobsonline.org/ajo?joblist=1&keywords=${field}`];
-    case "jobs.ac.uk":
-      return [`https://www.jobs.ac.uk/search/?keywords=${field}`];
-    case "findamasters.com":
-      return [`https://www.findamasters.com/masters-degrees/?Keywords=${field}`];
-    case "mastersportal.com":
-      return [`https://www.mastersportal.com/search/master/${field}`];
-    case "bachelorsportal.com":
-      return [`https://www.bachelorsportal.com/search/bachelor/${field}`];
-    case "scholarship-positions.com":
-      return [`https://www.scholarship-positions.com/?s=${field}`];
-    default:
-      return [];
+    case "findaphd.com": return [`https://www.findaphd.com/phds/?Keywords=${field}`];
+    case "phdportal.com": return [`https://www.phdportal.com/search/phd/engineering-technology?keyword=${field}`];
+    case "euraxess.ec.europa.eu": return [`https://euraxess.ec.europa.eu/jobs?keywords=${field}`, ...countries.slice(0, 2).map((c) => `https://euraxess.ec.europa.eu/jobs?keywords=${field}&country=${encodeURIComponent(c)}`)];
+    case "academicpositions.com": return countries.length ? countries.slice(0, 2).map((c) => `https://academicpositions.com/jobs/country/${c.toLowerCase().replace(/\s+/g, "-")}`) : [`https://academicpositions.com/search?query=${field}`];
+    case "phdgermany.de": return [`https://phdgermany.de/search?q=${field}`];
+    case "academicjobsonline.org": return [`https://academicjobsonline.org/ajo?joblist=1&keywords=${field}`];
+    case "jobs.ac.uk": return [`https://www.jobs.ac.uk/search/?keywords=${field}`];
+    case "findamasters.com": return [`https://www.findamasters.com/masters-degrees/?Keywords=${field}`];
+    case "mastersportal.com": return [`https://www.mastersportal.com/search/master/${field}`];
+    case "bachelorsportal.com": return [`https://www.bachelorsportal.com/search/bachelor/${field}`];
+    case "scholarship-positions.com": return [`https://www.scholarship-positions.com/?s=${field}`];
+    default: return [];
   }
 }
 
-async function directPortalSearch(
-  site: string,
-  degreeLevel: DegreeLevel,
-  fieldHint: string,
-  countryHint?: string,
-): Promise<PositionListing[]> {
+async function directPortalSearch(site: string, degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): Promise<PositionListing[]> {
   const out: PositionListing[] = [];
-
   for (const url of directSearchUrls(site, fieldHint, countryHint)) {
     try {
       console.log(`Direct portal search ${site}: ${url}`);
       const response = await fetchText(url);
-
       if (!response.ok) {
         console.log(`Direct portal ${site}: HTTP ${response.status}`);
         continue;
       }
-
       out.push(...parseSearchHtml(response.text, site).slice(0, 20));
       if (out.length >= 20) break;
     } catch (error) {
       console.error(`Direct portal search failed for ${site}:`, String(error));
     }
   }
-
   return dedupe(out).slice(0, 20);
 }
 
@@ -337,50 +310,31 @@ async function searchBing(query: string, site: string): Promise<PositionListing[
   url.searchParams.set("q", query);
   url.searchParams.set("format", "rss");
   url.searchParams.set("count", "10");
-
   const response = await fetch(url, {
     headers: {
       accept: "application/rss+xml, application/xml, text/xml;q=0.9,*/*;q=0.8",
       "user-agent": "Mozilla/5.0 (compatible; ImmigrationPositionBot/5.0)",
     },
   });
-
   if (!response.ok) throw new Error(`Bing RSS returned ${response.status}`);
   return parseBingRss(await response.text(), site);
 }
 
 function providerQuery(site: string, degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): string {
-  const degree = degreeLevel === "phd"
-    ? "phd OR doctoral OR studentship"
-    : degreeLevel === "master"
-      ? "master OR masters OR msc"
-      : "bachelor OR undergraduate";
-
+  const degree = degreeLevel === "phd" ? "phd OR doctoral OR studentship" : degreeLevel === "master" ? "master OR masters OR msc" : "bachelor OR undergraduate";
   const siteTerms = (SITE_TERMS[site] ?? [degree]).slice(0, 4).join(" OR ");
   const fields = fieldTerms(fieldHint).slice(0, 5).join(" OR ");
   const countries = countryTerms(countryHint).slice(0, 5).join(" OR ");
-
-  return [
-    `site:${site}`,
-    `(${siteTerms || degree})`,
-    fields ? `(${fields})` : "",
-    countries ? `(${countries})` : "",
-  ].filter(Boolean).join(" ");
+  return [`site:${site}`, `(${siteTerms || degree})`, fields ? `(${fields})` : "", countries ? `(${countries})` : ""].filter(Boolean).join(" ");
 }
 
-async function searchSite(
-  site: string,
-  degreeLevel: DegreeLevel,
-  fieldHint: string,
-  countryHint?: string,
-): Promise<PositionListing[]> {
+async function searchSite(site: string, degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): Promise<PositionListing[]> {
   let collected = await directPortalSearch(site, degreeLevel, fieldHint, countryHint);
   console.log(`Direct search complete ${site}: ${collected.length} results`);
 
   if (!collected.length) {
     const query = providerQuery(site, degreeLevel, fieldHint, countryHint);
     console.log(`Provider fallback ${site}: ${query}`);
-
     try {
       collected = await searchBing(query, site);
       console.log(`Bing fallback ${site}: ${collected.length} results`);
@@ -389,31 +343,17 @@ async function searchSite(
     }
   }
 
-  const coreFiltered = collected.filter((listing) =>
-    passesCoreFilters(listing, degreeLevel, fieldHint, countryHint)
-  );
+  const rawCount = collected.length;
+  const filtered = collected.filter((listing) => passesCoreFilters(listing, degreeLevel, fieldHint, countryHint));
+  console.log(`Search complete ${site}: ${rawCount} raw -> ${filtered.length} after hard filters -> ${filtered.length} ranked`);
 
-  const ranked = dedupe(coreFiltered).sort(
-    (a, b) =>
-      relevanceScore(b, degreeLevel, fieldHint, countryHint) -
-      relevanceScore(a, degreeLevel, fieldHint, countryHint)
-  );
-
-  console.log(
-    `Search complete ${site}: ${collected.length} raw -> ` +
-    `${coreFiltered.length} after hard filters -> ${ranked.length} ranked`
-  );
-
-  return ranked.slice(0, 20);
+  return filtered
+    .sort((a, b) => relevanceScore(b, degreeLevel, fieldHint, countryHint) - relevanceScore(a, degreeLevel, fieldHint, countryHint))
+    .slice(0, 20);
 }
 
-export async function searchPositions(
-  degreeLevel: DegreeLevel,
-  fieldHint: string,
-  countryHint?: string,
-): Promise<PositionListing[]> {
+export async function searchPositions(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): Promise<PositionListing[]> {
   const all: PositionListing[] = [];
-
   for (const site of SITES_BY_DEGREE[degreeLevel]) {
     try {
       all.push(...await searchSite(site, degreeLevel, fieldHint, countryHint));
@@ -422,27 +362,13 @@ export async function searchPositions(
     }
   }
 
-  const ranked = dedupe(all).sort(
-    (a, b) =>
-      relevanceScore(b, degreeLevel, fieldHint, countryHint) -
-      relevanceScore(a, degreeLevel, fieldHint, countryHint)
-  );
-
-  console.log(
-    `Multi-site search complete: ${SITES_BY_DEGREE[degreeLevel].length} sites, ` +
-    `${ranked.length} filtered unique listings, returning ${Math.min(MAX_SEARCH_CANDIDATES, ranked.length)} candidates for AI matching`
-  );
-
-  return ranked.slice(0, MAX_SEARCH_CANDIDATES);
+  const unique = dedupe(all).slice(0, MAX_SEARCH_CANDIDATES);
+  console.log(`Multi-site search complete: ${SITES_BY_DEGREE[degreeLevel].length} sites, ${unique.length} filtered unique listings, returning ${unique.length} candidates for AI matching`);
+  return unique;
 }
 
-export function fallbackSearchLinks(
-  degreeLevel: DegreeLevel,
-  fieldHint: string,
-  countryHint?: string,
-): string[] {
+export function fallbackSearchLinks(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): string[] {
   const q = encodeURIComponent([fieldHint, countryHint ?? ""].filter(Boolean).join(" "));
-
   if (degreeLevel === "phd") {
     return [
       `https://www.findaphd.com/phds/?Keywords=${q}`,
@@ -454,7 +380,6 @@ export function fallbackSearchLinks(
       `https://www.jobs.ac.uk/search/?keywords=${q}`,
     ];
   }
-
   if (degreeLevel === "master") {
     return [
       `https://www.findamasters.com/masters-degrees/?Keywords=${q}`,
@@ -462,7 +387,6 @@ export function fallbackSearchLinks(
       `https://www.scholarship-positions.com/?s=${q}`,
     ];
   }
-
   return [
     `https://www.bachelorsportal.com/search/bachelor/${q}`,
     `https://www.scholarship-positions.com/?s=${q}`,
