@@ -53,12 +53,31 @@ export class TelegramClient {
     return this.call("sendChatAction", { chat_id: chatId, action });
   }
 
-  /** Updates just the buttons under an already-sent message (e.g. after a tap, to reflect the new state). Pass null to clear them. */
-  editMessageReplyMarkup(chatId: number, messageId: number, inlineKeyboard: InlineButton[][] | null) {
+  /**
+   * Updates just the buttons under an already-sent message.
+   * Accepts either the raw button matrix or the same
+   * { inlineKeyboard: ... } shape used by other Telegram methods.
+   * Pass null to clear the buttons.
+   */
+  editMessageReplyMarkup(
+    chatId: number,
+    messageId: number,
+    inlineKeyboard:
+      | InlineButton[][]
+      | { inlineKeyboard: InlineButton[][] }
+      | null
+  ) {
+    const keyboard =
+      inlineKeyboard === null
+        ? null
+        : Array.isArray(inlineKeyboard)
+          ? inlineKeyboard
+          : inlineKeyboard.inlineKeyboard;
+
     return this.call("editMessageReplyMarkup", {
       chat_id: chatId,
       message_id: messageId,
-      reply_markup: { inline_keyboard: inlineKeyboard ?? [] },
+      reply_markup: { inline_keyboard: keyboard ?? [] },
     });
   }
 
