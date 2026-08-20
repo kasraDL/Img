@@ -10,10 +10,48 @@ const FIELD_ALIASES: Record<string, string[]> = {
   engineering: ["engineering", "civil engineering", "structural engineering", "mechanical engineering", "electrical engineering", "chemical engineering"],
   "structural engineering": ["structural engineering", "structural mechanics", "structural analysis", "structural design", "civil engineering", "structures"],
   "civil engineering": ["civil engineering", "structural engineering", "construction", "infrastructure"],
+  "mechanical engineering": ["mechanical engineering", "mechanics", "thermodynamics", "materials engineering"],
+  "electrical engineering": ["electrical engineering", "electronics", "electrical systems", "control engineering"],
+  "chemical engineering": ["chemical engineering", "process engineering", "chemical processes"],
+  "transportation engineering": ["transportation engineering", "transportation", "traffic engineering", "transport systems"],
+  "water resources": ["water resources", "hydrology", "hydraulic engineering", "water engineering"],
   "machine learning": ["machine learning", "artificial intelligence", "deep learning", "ai"],
   "artificial intelligence": ["artificial intelligence", "machine learning", "deep learning", "ai"],
+  "computer vision": ["computer vision", "image processing", "visual recognition", "artificial intelligence"],
+  "data science": ["data science", "machine learning", "statistics", "data analytics"],
+  "software engineering": ["software engineering", "software development", "computer science"],
+  robotics: ["robotics", "robot", "automation", "control engineering"],
   "computer science": ["computer science", "computing", "software", "artificial intelligence"],
   "environmental engineering": ["environmental engineering", "environmental science", "sustainability"],
+  "water treatment": ["water treatment", "wastewater treatment", "water purification"],
+  wastewater: ["wastewater", "wastewater treatment", "sewage", "water treatment"],
+  "climate science": ["climate science", "climate change", "climate research"],
+  sustainability: ["sustainability", "sustainable development", "environmental engineering"],
+  architecture: ["architecture", "architectural design", "built environment"],
+  business: ["business", "management", "business administration"],
+  economics: ["economics", "econometrics", "economic research"],
+  medicine: ["medicine", "medical", "clinical", "health sciences"],
+};
+
+const RESEARCH_AREA_PARENT: Record<string, string> = {
+  "civil engineering": "engineering",
+  "structural engineering": "engineering",
+  "mechanical engineering": "engineering",
+  "electrical engineering": "engineering",
+  "chemical engineering": "engineering",
+  "transportation engineering": "engineering",
+  "water resources": "engineering",
+  "artificial intelligence": "computer science",
+  "machine learning": "computer science",
+  "computer vision": "computer science",
+  "data science": "computer science",
+  "software engineering": "computer science",
+  robotics: "computer science",
+  "environmental engineering": "environmental science",
+  "water treatment": "environmental science",
+  wastewater: "environmental science",
+  "climate science": "environmental science",
+  sustainability: "environmental science",
 };
 
 const COUNTRY_ALIASES: Record<string, string[]> = {
@@ -101,7 +139,6 @@ function coreFilterMatch(listing: PositionListing, filters: SearchFilters): bool
   const degreeOk = containsAny(text, degreeTerms(filters.degree_level)) || siteGuaranteesDegree(listing.source_site ?? "", filters.degree_level);
   if (!degreeOk) return false;
 
-  // Field and research area are separate AND conditions.
   if (filters.field?.trim() && !containsAny(text, fieldTerms(filters.field))) return false;
   if (filters.research_area?.trim() && !containsAny(text, fieldTerms(filters.research_area))) return false;
   if (!countryMatch(listing, filters.countries ?? [])) return false;
@@ -232,9 +269,13 @@ async function searchSite(site: string, filters: SearchFilters): Promise<Positio
 }
 
 export async function searchPositions(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string, filtersInput?: SearchFilters): Promise<PositionListing[]> {
+  const fieldKey = clean(fieldHint).toLowerCase();
+  const inferredParentField = RESEARCH_AREA_PARENT[fieldKey];
+
   const filters: SearchFilters = {
     ...(filtersInput ?? {}),
     degree_level: filtersInput?.degree_level ?? degreeLevel,
+    field: filtersInput?.field ?? inferredParentField,
     research_area: filtersInput?.research_area ?? fieldHint,
     countries: filtersInput?.countries ?? (countryHint ? countryHint.split(",").map((x) => x.trim()).filter(Boolean) : []),
   };
@@ -251,22 +292,7 @@ export async function searchPositions(degreeLevel: DegreeLevel, fieldHint: strin
 
 export function fallbackSearchLinks(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string): string[] {
   const q = encodeURIComponent([fieldHint, countryHint ?? ""].filter(Boolean).join(" "));
-  if (degreeLevel === "phd") return [
-    `https://www.findaphd.com/phds/?Keywords=${q}`,
-    `https://www.phdportal.com/search/phd/${q}`,
-    `https://euraxess.ec.europa.eu/jobs/search?keywords=${q}`,
-    `https://academicpositions.com/find-jobs?query=${q}`,
-    `https://phdgermany.de/search?q=${q}`,
-    `https://academicjobsonline.org/ajo?joblist=1&keywords=${q}`,
-    `https://www.jobs.ac.uk/search/?keywords=${q}`,
-  ];
-  if (degreeLevel === "master") return [
-    `https://www.findamasters.com/masters-degrees/?Keywords=${q}`,
-    `https://www.mastersportal.com/search/master/${q}`,
-    `https://www.scholarship-positions.com/?s=${q}`,
-  ];
-  return [
-    `https://www.bachelorsportal.com/search/bachelor/${q}`,
-    `https://www.scholarship-positions.com/?s=${q}`,
-  ];
+  if (degreeLevel === "phd") return [`https://www.findaphd.com/phds/?Keywords=${q}`, `https://www.phdportal.com/search/phd/${q}`, `https://euraxess.ec.europa.eu/jobs/search?keywords=${q}`, `https://academicpositions.com/find-jobs?query=${q}`, `https://phdgermany.de/search?q=${q}`, `https://academicjobsonline.org/ajo?joblist=1&keywords=${q}`, `https://www.jobs.ac.uk/search/?keywords=${q}`];
+  if (degreeLevel === "master") return [`https://www.findamasters.com/masters-degrees/?Keywords=${q}`, `https://www.mastersportal.com/search/master/${q}`, `https://www.scholarship-positions.com/?s=${q}`];
+  return [`https://www.bachelorsportal.com/search/bachelor/${q}`, `https://www.scholarship-positions.com/?s=${q}`];
 }
