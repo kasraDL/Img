@@ -22,10 +22,17 @@ export function buildMailtoLink(toEmail: string | null | undefined, draft: strin
   }
 
   const body = lines.slice(bodyStartIndex).join("\n").trim();
-  const params = new URLSearchParams();
-  if (subject) params.set("subject", subject);
-  if (body) params.set("body", body);
+
+  // Deliberately not URLSearchParams: it encodes spaces as "+" (the
+  // application/x-www-form-urlencoded convention), but mailto: links follow
+  // RFC 6068, where "+" is a literal character, not a decoded space. Several
+  // mail clients don't convert it back, so every space in the draft would
+  // show up as a literal "+" in the opened email. encodeURIComponent uses
+  // %20 for spaces, which is what RFC 6068 actually expects.
+  const params: string[] = [];
+  if (subject) params.push(`subject=${encodeURIComponent(subject)}`);
+  if (body) params.push(`body=${encodeURIComponent(body)}`);
 
   const to = toEmail ? encodeURIComponent(toEmail) : "";
-  return `mailto:${to}?${params.toString()}`;
+  return `mailto:${to}${params.length ? `?${params.join("&")}` : ""}`;
 }

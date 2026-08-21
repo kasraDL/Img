@@ -3157,11 +3157,17 @@ async function generateAndSendDocument(
           fallbackText
         );
 
+      // result.source is "page" only when we actually fetched and read the
+      // real listing page; it's null when the fetch failed or we only had a
+      // weak fallback snippet to work with. Writing null (instead of always
+      // "page") means a genuinely failed extraction gets retried the next
+      // time the student generates a document for this position, rather than
+      // being locked in forever.
       await updateApplicationDetails(
         env.DB,
         applicationId,
         result.details,
-        "page"
+        result.source
       );
 
       application =
@@ -3404,7 +3410,36 @@ async function generateAndSendDocument(
 // CALLBACK QUERY
 // =============================================================================
 
+/**
+ * Thin wrapper around the real handler: none of the ~30 branches below have
+ * their own try/catch, so a single DB/AI/network error partway through used
+ * to leave the tapped button spinning forever (Telegram only clears that
+ * spinner once answerCallbackQuery is called) with no feedback to the
+ * student. This makes sure every code path answers the callback, even the
+ * unexpected-error one.
+ */
 export async function handleCallbackQuery(
+  cb: NonNullable<TelegramUpdate["callback_query"]>,
+  env: Env
+): Promise<void> {
+  try {
+    await handleCallbackQueryInner(cb, env);
+  } catch (error) {
+    console.error("handleCallbackQuery failed:", error);
+    try {
+      const tg = new TelegramClient(env.TELEGRAM_BOT_TOKEN);
+      await tg.answerCallbackQuery(
+        cb.id,
+        "⚠️ Something went wrong - please try again.",
+        true
+      );
+    } catch (ackError) {
+      console.error("Failed to acknowledge callback after error:", ackError);
+    }
+  }
+}
+
+async function handleCallbackQueryInner(
   cb: NonNullable<
     TelegramUpdate["callback_query"]
   >,

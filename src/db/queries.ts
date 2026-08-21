@@ -304,7 +304,12 @@ export async function updateApplicationDetails(
   db: D1Database,
   id: number,
   details: PositionDetails,
-  source: "page" | "student"
+  // null means "we tried to extract from the listing page but couldn't"
+  // (page unreachable, or only a weak fallback snippet was available) - it's
+  // written as-is (not coerced to "page") so the next document generation for
+  // this position retries the real page fetch instead of permanently
+  // settling for incomplete data. See the caller in webhook.ts.
+  source: "page" | "student" | null
 ): Promise<void> {
   const current = await getApplicationById(db, id);
   if (!current) return;
