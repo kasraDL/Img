@@ -2,9 +2,9 @@
 
 A Telegram bot on **Cloudflare Workers** that helps students find academic positions from a CV, score matches, prepare application drafts, track applications, and generate Excel reports.
 
-## Status
+## Release status
 
-This repository has been audited and hardened, but **do not publish the current `main` revision to a multi-user production bot yet**. The remaining release blocker is callback authorization: callback IDs must be verified against the Telegram chat that pressed the button before position/application state is read or mutated.
+The repository has been audited and the main security blocker identified in the callback flow has been fixed. **The code is ready for runtime validation, not yet for blind production deployment.** Run the checks in `AUDIT.md` before publishing.
 
 ## Stack
 
@@ -43,7 +43,7 @@ npm run db:migrate:language
 npm run db:migrate:applications
 ```
 
-Deploy only after the production blocker in `AUDIT.md` is resolved and validation passes:
+Validate and deploy:
 
 ```bash
 npm run check
@@ -60,10 +60,10 @@ After deployment, register the Telegram webhook once by visiting `/setup` on the
 ## Security model
 
 - Telegram webhook requests are checked with `TELEGRAM_WEBHOOK_SECRET`.
+- Callback position/application IDs are verified against the Telegram chat before actions are executed.
 - Telegram tokens, webhook secrets, and search API keys belong in Wrangler secrets, not Git.
 - CV PDFs are stored in R2 and extracted profiles in D1.
 - Generated emails are opened through `mailto:` so the student reviews and sends them manually.
-- Callback actions must be authorization-bound to the callback chat before release.
 
 ## Main commands
 
@@ -79,4 +79,4 @@ After deployment, register the Telegram webhook once by visiting `/setup` on the
 - `/language` — switch English/Persian
 - `/help` — show available commands
 
-See `AUDIT.md` for the current audit findings and release checklist.
+See `AUDIT.md` for the validation checklist.

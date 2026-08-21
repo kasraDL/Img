@@ -1,34 +1,48 @@
 # Audit status
 
-## Fourth pass — production hardening
+## Production hardening completed
 
-- **Cross-user callback authorization is now a release blocker.** Position and application callback IDs are currently accepted without verifying that the referenced row belongs to the Telegram chat that pressed the button. A guessed ID could therefore mutate another student's shortlist/application state and, for document generation, potentially expose another student's CV-derived content. This must be fixed before public production use by binding every action to the authenticated callback chat ID.
-- **Telegram document sends now validate the API JSON response**, not only the HTTP status. Telegram can return HTTP 200 with `{ok:false}`; `/report` and other document sends must treat that as a failure.
-- **Workers compatibility date should track the current runtime.** The project now uses the current 2026-08-21 compatibility date. Cloudflare recommends keeping this current for new runtime behavior and fixes.
+- **Cross-user callback authorization:** fixed at the webhook boundary. Position and application callback IDs are now checked against `cb.message.chat.id` before the legacy dispatcher can read or mutate them.
+- **Telegram document sends:** `/report` and other document sends now validate Telegram's JSON `{ok:false}` response even when HTTP status is 200.
+- **Workers compatibility date:** updated to `2026-08-21`, matching current Cloudflare guidance.
+- **Webhook secret check:** rejects missing or mismatched Telegram secret headers.
+- **Markdown delivery:** Telegram text sends retry as plain text when Telegram rejects malformed Markdown entities.
+- **Application detail provenance:** failed page extraction remains retryable instead of being permanently recorded as a successful page extraction.
+- **Mailto encoding:** uses percent encoding compatible with `mailto:` rather than form-style `+` spaces.
+- **Excel export:** mitigates spreadsheet formula injection for externally sourced text.
+- **Search latency:** source-site searches run in parallel.
+- **Workers AI response parsing:** reads the current binding's `response` field first, with a compatibility fallback.
 
-## Third pass — confirmed bugs fixed
+## Remaining validation
 
-- **`details_source` was always hardcoded to `"page"`** in `generateAndSendDocument`, even when `extractPositionDetails()` genuinely found nothing. Fixed by writing `result.source` through instead of a literal `"page"`.
-- **Callback errors now get acknowledged.** The callback dispatcher is wrapped so unexpected DB/AI/network failures do not leave Telegram's button spinner stuck indefinitely.
-- **`buildMailtoLink` now uses RFC-compatible percent encoding** instead of form encoding that turns spaces into `+`.
-- **Excel formula injection is mitigated** by prefixing dangerous spreadsheet-cell values with `'`.
+The repository has not been executed in a real Node/Cloudflare runtime from this environment because the runtime could not resolve `github.com` for a local clone. Before the actual production deploy, run:
 
-## Second pass — confirmed bugs fixed
+```bash
+npm ci
+npm run check
+npx wrangler deploy --dry-run
+```
 
-- **Brave Search API key is wired through** from the Worker environment.
-- **Telegram Markdown parse failures fall back to plain text** at the client layer.
-- **Position searches run in parallel per source site** instead of serially.
+Then test at least:
 
-## Confirmed critical issue fixed
+1. `/start` and PDF CV upload.
+2. AI profile extraction.
+3. A PhD search with and without `BRAVE_SEARCH_API_KEY`.
+4. Save/dismiss/applied callbacks.
+5. Letter/email generation.
+6. `/report` Excel download.
+7. The 10-day reminder cron path.
+8. An unauthorized callback ID from another chat must be rejected.
 
-`workersAI.ts` reads `response` from the native Workers AI binding first, with `choices[0].message.content` retained as a compatibility fallback. Cloudflare's current gpt-oss binding documents `response` as the synchronous output field.
+## Workers AI quota
 
-## Current production blockers
+`@cf/openai/gpt-oss-120b` is currently an active Workers AI model. Workers AI currently includes a 10,000-neuron/day free allocation. High-volume per-listing matching can consume that quota quickly, so production usage should be monitored and capped or moved to a paid plan as required.
 
-1. **Fix callback ownership before publishing publicly.** Do not deploy the current `main` revision to a multi-user production bot until position/application actions verify ownership against `cb.message.chat.id`.
-2. Run `npm ci`, `npm run check`, and `npx wrangler deploy --dry-run` in a real Node/Cloudflare environment. The current execution environment cannot reach GitHub to clone the repository, so those commands have not been executed here.
-3. Run the existing D1 migrations on the deployed database if they have not already been applied.
+## Database
 
-## Cloudflare notes
+For a fresh database, run `npm run db:init:remote`. For an existing deployment, apply each migration that has not already been applied:
 
-The configured model `@cf/openai/gpt-oss-120b` is currently listed by Cloudflare as an active Workers AI model. Workers AI has a 10,000-neuron/day free allocation; high-volume matching can exhaust that quota quickly, so production traffic should be monitored and capped or moved to a paid plan as needed.
+```bash
+npm run db:migrate:language
+npm run db:migrate:applications
+```
