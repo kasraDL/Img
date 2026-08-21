@@ -6,6 +6,7 @@ export interface Env {
 
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_WEBHOOK_SECRET: string;
+  BRAVE_SEARCH_API_KEY?: string;
 }
 
 export type DegreeLevel = "bachelor" | "master" | "phd";

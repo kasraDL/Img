@@ -8,7 +8,7 @@ A Telegram bot on **Cloudflare Workers** that:
 3. Asks which level they're applying for — **Bachelor / Master / PhD**
 4. Asks for a field/research hint and an optional country preference
 5. Searches known academic position sites (FindAPhD, EURAXESS, AcademicPositions,
-   FindAMasters, etc.) via a **free DuckDuckGo HTML search** (no API key), plus
+   FindAMasters, etc.) using the **Brave Search API** if configured, or **Bing public RSS** automatically if no key is configured, plus
    any Telegram channels or LinkedIn pages you register
 6. Scores every result against the student's profile with Workers AI and returns
    tap-to-act result cards (📄 Letter, ✉️ Email, ⭐ Save, ✅ Applied, 🚫 Dismiss)
@@ -28,7 +28,7 @@ A Telegram bot on **Cloudflare Workers** that:
 | CV PDF storage | Cloudflare R2 | Free (10GB storage) |
 | Conversation state | Cloudflare KV | Free (100k reads/day) |
 | CV parsing, match scoring, letter/email drafting | **Cloudflare Workers AI** | Free **daily quota** (resets every day) |
-| Position search | **DuckDuckGo HTML scrape** | Free, no key — but unofficial (see caveat below) |
+| Position search | **Brave Search API** (optional) / **Bing RSS** fallback | Free fallback; optional API key |
 | Excel export | **SheetJS**, generated in-Worker | Free, no external service |
 | 10-day reminder sweep | Cloudflare **Cron Triggers** | Free |
 | Sending the actual email | Student's own mail app (`mailto:`) | Free, and no API/domain setup needed |
@@ -42,8 +42,8 @@ in this stack bills you unless you go past Cloudflare's daily free allowances.
 - **Workers AI's free tier is a daily quota**, not unlimited forever. Fine for
   testing and light real usage; if the bot gets heavy traffic, Cloudflare will
   eventually bill for extra Workers AI usage past the daily allowance.
-- **DuckDuckGo search has no official API** — `src/services/search.ts` scrapes
-  its plain HTML results page, which works today but isn't guaranteed to keep
+- **Bing RSS is an unofficial public endpoint** — `src/services/search.ts` scrapes
+  Bing's public RSS endpoint, which works today but isn't guaranteed to keep
   working if DuckDuckGo changes its markup or rate-limits the requests. If it
   stops working, the bot falls back to just handing the student direct search
   links. If you outgrow this, Google's Programmable Search Engine gives 100
@@ -106,6 +106,7 @@ npm run db:init:remote
 ```bash
 wrangler secret put TELEGRAM_BOT_TOKEN
 wrangler secret put TELEGRAM_WEBHOOK_SECRET   # any random string you make up yourself
+wrangler secret put BRAVE_SEARCH_API_KEY       # optional
 ```
 
 ## 5. Deploy

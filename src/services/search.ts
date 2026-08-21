@@ -294,6 +294,42 @@ function parseBingRss(xml: string, site: string): PositionListing[] {
   return out.slice(0, 20);
 }
 
+async function searchBrave(
+  apiKey: string,
+  query: string,
+  sourceSite: string
+): Promise<PositionListing[]> {
+  const url = new URL("https://api.search.brave.com/res/v1/web/search");
+  url.searchParams.set("q", query);
+  url.searchParams.set("count", "20");
+  url.searchParams.set("search_lang", "en");
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "X-Subscription-Token": apiKey,
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Brave Search returned ${response.status}`);
+  }
+  const payload = (await response.json()) as {
+    web?: {
+      results?: Array<{ title?: string; url?: string; description?: string }>;
+    };
+  };
+  return (payload.web?.results ?? []).
+    .filter((item) => item.url && item.title && isSourceUrl(item.url, sourceSite))
+    .map((item) => ({
+      title: stripTags(item.title ?? ""),
+      url: item.url ?? "",
+      snippet: stripTags(item.description ?? ""),
+      source_site: sourceSite,
+      country: countryCanonical(`${item.title ?? ""} ${item.description ?? ""} ${item.url ?? ""}`),
+    }))
+    .filter((item) => looksLikeRealPosition(sourceSite, item.url, item.title))
+    .slice(0, 10);
+}
+
 async function fetchText(url: string): Promise<{ ok: boolean; status: number; text: string }> {
   const response = await fetch(url, { headers: { accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "user-agent": "Mozilla/5.0 (compatible; ImmigrationPositionBot/10.0)" } });
   return { ok: response.ok, status: response.status, text: await response.text() };
@@ -322,7 +358,7 @@ async function searchBing(query: string, site: string): Promise<PositionListing[
   return parseBingRss(await response.text(), site);
 }
 
-async function searchSite(site: string, filters: SearchFilters): Promise<PositionListing[]> {
+async function searchSite(site: string, filters: SearchFilters, braveSearchApiKey?: string): Promise<PositionListing[]> {
   let raw: PositionListing[] = []; let scope: SearchScope = { field: false, research_area: false, country: false, degree: false };
   for (const url of directSearchUrls(site, filters)) {
     console.log(`Direct portal search ${site}: ${url}`);
@@ -335,6 +371,18 @@ async function searchSite(site: string, filters: SearchFilters): Promise<Positio
     } catch (error) { console.error(`Direct portal ${site} failed:`, String(error)); }
   }
   raw = dedupe(raw);
+
+  if (raw.length === 0 && braveSearchApiKey?.trim()) {
+    try {
+      const query = providerQuery(site, filters);
+      console.log(`Brave evidence search ${site}: ${query}`);
+      raw = dedupe(await searchBrave(braveSearchApiKey, query, site));
+      console.log(`Brave Search ${site}: ${raw.length} results`);
+    } catch (error) {
+      console.error(`Brave Search failed for ${site}:`, String(error));
+    }
+  }
+
   if (raw.length === 0) {
     const query = providerQuery(site, filters); console.log(`Provider fallback ${site}: ${query}`);
     try {
@@ -347,11 +395,20 @@ async function searchSite(site: string, filters: SearchFilters): Promise<Positio
   return filtered.slice(0, 20);
 }
 
-export async function searchPositions(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string, filtersInput?: SearchFilters): Promise<PositionListing[]> {
+export async function searchPositions(degreeLevel: DegreeLevel, fieldHint: string, countryHint?: string, filtersInput?: SearchFilters, braveSearchApiKey?: string): Promise<PositionListing[]> {
   const fieldKey = clean(fieldHint).toLowerCase(); const inferredParentField = RESEARCH_AREA_PARENT[fieldKey];
   const filters: SearchFilters = { ...(filtersInput ?? {}), degree_level: filtersInput?.degree_level ?? degreeLevel, field: filtersInput?.field ?? inferredParentField, research_area: filtersInput?.research_area ?? fieldHint, countries: filtersInput?.countries ?? (countryHint ? countryHint.split(",").map((x) => x.trim()).filter(Boolean) : []) };
-  const all: PositionListing[] = [];
-  for (const site of SITES_BY_DEGREE[filters.degree_level]) { try { all.push(...await searchSite(site, filters)); } catch (error) { console.error(`Site search failed for ${site}:`, String(error)); } }
+  const perSite = await Promise.all(
+    SITES_BY_DEGREE[filters.degree_level].map(async (site) => {
+      try {
+        return await searchSite(site, filters, braveSearchApiKey);
+      } catch (error) {
+        console.error(`Site search failed for ${site}:`, String(error));
+        return [] as PositionListing[];
+      }
+    }),
+  );
+  const all = perSite.flat();
   const unique = dedupe(all).sort((a, b) => relevanceScore(b, filters) - relevanceScore(a, filters)).slice(0, 10);
   console.log(`Multi-site search complete: ${SITES_BY_DEGREE[filters.degree_level].length} sites, ${unique.length} filtered unique listings, returning ${unique.length} candidates for AI matching`);
   return unique;
