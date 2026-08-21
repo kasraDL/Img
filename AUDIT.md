@@ -1,5 +1,12 @@
 # Audit status
 
+## Second pass — confirmed bugs fixed
+
+- **Brave Search API key wiring:** the optional `BRAVE_SEARCH_API_KEY` binding is passed from the Worker handler into the search layer.
+- **Telegram Markdown fallback:** text-send methods retry as plain text when Telegram rejects unescaped Markdown entities.
+- **Parallel multi-site search:** curated site searches run concurrently with `Promise.all`.
+
+
 ## Confirmed critical issue fixed
 
 `src/services/workersAI.ts` was reading `choices[0].message.content` from the native Workers AI binding. The current `@cf/openai/gpt-oss-120b` Workers AI binding returns the generated text in `response`. This caused CV extraction, position scoring, motivation letters, application emails, and follow-up emails to receive an empty string.

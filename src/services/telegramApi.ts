@@ -6,6 +6,21 @@ export interface InlineButton {
   url?: string; // for "open in mail app" buttons (mailto:) - set exactly one of url/callback_data
 }
 
+export class TelegramApiError extends Error {
+  constructor(
+    public readonly method: string,
+    public readonly description: string,
+    public readonly payload: unknown
+  ) {
+    super(`Telegram API error on ${method}: ${description}`);
+    this.name = "TelegramApiError";
+  }
+}
+
+function isEntityParseError(error: unknown): boolean {
+  return error instanceof TelegramApiError && /can't parse entities/i.test(error.description);
+}
+
 export class TelegramClient {
   private base: string;
   constructor(private token: string) {
@@ -20,9 +35,26 @@ export class TelegramClient {
     });
     const data = await res.json();
     if (!res.ok || (data as { ok?: boolean }).ok === false) {
-      throw new Error(`Telegram API error on ${method}: ${JSON.stringify(data)}`);
+      const description =
+        (data as { description?: string })?.description ?? JSON.stringify(data);
+      throw new TelegramApiError(method, description, data);
     }
     return data as T;
+  }
+
+  private async callWithTextFallback<T = unknown>(
+    method: string,
+    body: Record<string, unknown>
+  ): Promise<T> {
+    try {
+      return await this.call<T>(method, body);
+    } catch (error) {
+      if (isEntityParseError(error) && body.parse_mode) {
+        const { parse_mode: _parseMode, ...plain } = body;
+        return await this.call<T>(method, plain);
+      }
+      throw error;
+    }
   }
 
   async sendMessage(
@@ -46,7 +78,7 @@ export class TelegramClient {
     } else {
       body.reply_markup = { remove_keyboard: true };
     }
-    return this.call("sendMessage", body);
+    return this.callWithTextFallback("sendMessage", body);
   }
 
   sendChatAction(chatId: number, action: "typing" | "upload_document" = "typing") {
@@ -87,7 +119,7 @@ export class TelegramClient {
     text: string,
     opts?: { inlineKeyboard?: InlineButton[][] }
   ) {
-    return this.call("editMessageText", {
+    return this.callWithTextFallback("editMessageText", {
       chat_id: chatId,
       message_id: messageId,
       text,

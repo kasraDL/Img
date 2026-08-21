@@ -1,0 +1,31 @@
+name: Apply patch 0001
+
+on:
+  push:
+    branches:
+      - fix/search-pipeline-all-sites-v4
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "!contains(github.event.head_commit.message, 'apply patch 0001 improvements')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: fix/search-pipeline-all-sites-v4
+
+      - name: Apply migration
+        run: python3 scripts/apply_patch_0001_v2.py
+
+      - name: Commit applied patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- .gitignore AUDIT.md README.md src/handlers/webhook.ts src/services/search.ts src/services/telegramApi.ts src/types.ts wrangler.toml scripts/apply_patch_0001_v2.py patches/0001-fix-brave-search-telegram-markdown-crash-parallel-search.patch
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: apply patch 0001 improvements"
+          git push origin fix/search-pipeline-all-sites-v4
